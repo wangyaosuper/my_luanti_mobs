@@ -1,0 +1,33 @@
+return {
+    name = 'Original Game Boys',
+    curator = 'Linuxdirk',
+    description = 'Simulated colors of the original 4-shade Game Boys',
+    pixels = {
+        { color = '#294139', name = 'Original Game Boy 0x0' },
+        { color = '#39594a', name = 'Original Game Boy 0x1' },
+        { color = '#5a7942', name = 'Original Game Boy 0x2' },
+        { color = '#7b8210', name = 'Original Game Boy 0x3' },
+        'n',
+        { color = '#181818', name = 'Game Boy Pocket 0x0' },
+        { color = '#4a5138', name = 'Game Boy Pocket 0x1' },
+        { color = '#8c926b', name = 'Game Boy Pocket 0x2' },
+        { color = '#c5caa4', name = 'Game Boy Pocket 0x3' },
+        'n',
+        { color = '#004f3a', name = 'Game Boy Light 0x0 with backlight' },
+        { color = '#00694a', name = 'Game Boy Light 0x1 with backlight' },
+        { color = '#009a70', name = 'Game Boy Light 0x2 with backlight' },
+        { color = '#00b582', name = 'Game Boy Light 0x3 with backlight' },
+        'n',
+        'n',
+        { color = '#c4bebb', name = 'Original Game Boy case' },
+        { color = '#9a2257', name = 'Original Game Boy buttons' },
+        { color = '#494786', name = 'Original Game Boy branding text' },
+        { color = '#272929', name = 'Original Game Box D-pad' },
+        'n',
+        { color = '#b80a41', name = 'Game Boy Color “Color” colors: C' },
+        { color = '#3d3d3d', name = 'Game Boy Color “Color” colors: O (1)' },
+        { color = '#6eb122', name = 'Game Boy Color “Color” colors: L' },
+        { color = '#daac06', name = 'Game Boy Color “Color” colors: O (2)' },
+        { color = '#00938a', name = 'Game Boy Color “Color” colors: R' }
+    }
+}

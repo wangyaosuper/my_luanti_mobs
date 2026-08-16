@@ -1,0 +1,5 @@
+
+#Enable myores or mywhiteblock blocks
+mysiding.myores(Enable myores) bool true
+mysiding.mywhiteblock(Enable mywhiteblock) bool true
+
