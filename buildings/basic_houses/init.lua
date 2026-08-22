@@ -95,8 +95,18 @@ if( minetest.get_modpath("core") and minetest.get_modpath("trees")) then
 		"decorations:lazurite_block", "decorations:olivine_block", "decorations:petrified_wood_block",
 		"decorations:satinspar_block", "decorations:selenite_block", "decorations:serpentine_block"};
 	basic_houses.door_bottom = "doors:door_pine_b_1";
-	basic_houses.door_top    = "doors:door_pine_t_1";
-	basic_houses.around_house = basic_houses.walls;
+basic_houses.door_top    = "doors:door_pine_t_1";
+basic_houses.around_house = basic_houses.walls;
+basic_houses.torch = "default:torch";
+basic_houses.tnt   = "tnt:tnt";
+basic_houses.diamond = "default:diamond";
+basic_houses.mese  = "default:mese";
+basic_houses.mese_crystal = "default:mese_crystal";
+basic_houses.gold_lump = "default:gold_lump";
+basic_houses.gold_ingot = "default:gold_ingot";
+basic_houses.iron_ingot = "default:steel_ingot";
+basic_houses.bucket_water = "bucket:bucket_water";
+basic_houses.bread = "farming:bread";
 -- if the MineClone2 game is choosen: adjust materials
 elseif( minetest.get_modpath("mcl_core")) then
 	local colors = {"red", "green", "blue", "light_blue", "black", "white",
@@ -128,6 +138,16 @@ elseif( minetest.get_modpath("mcl_core")) then
 		"mcl_core:redsandstonesmooth", "mcl_core:redsandstonesmooth2"};
 	basic_houses.door_bottom = "mcl_doors:wooden_door_b_1";
 	basic_houses.door_top    = "mcl_doors:wooden_door_t_1";
+	basic_houses.torch = "mcl_core:torch";
+	basic_houses.tnt   = "mcl_tnt:tnt";
+	basic_houses.diamond = "mcl_core:diamond";
+	basic_houses.mese  = "mcl_core:goldblock";
+	basic_houses.mese_crystal = "mcl_core:gold_ingot";
+	basic_houses.gold_lump = "mcl_core:gold_ingot";
+	basic_houses.gold_ingot = "mcl_core:gold_ingot";
+	basic_houses.iron_ingot = "mcl_core:iron_ingot";
+	basic_houses.bucket_water = "mcl_buckets:bucket_water";
+	basic_houses.bread = "mcl_farming:bread";
 end
 
 -- build either the two walls of the box that forms the house in x or z direction;
@@ -399,6 +419,53 @@ end
 
 -- the chest is placed on one of the upper floors; it contains
 -- additional building material
+basic_houses.fill_chest_with_loot = function(inv, pr)
+	local function add(item, cnt)
+		if not (item and cnt and cnt > 0) then return end
+		if not minetest.registered_items[item] then return end
+		inv:add_item("main", item.." "..tostring(cnt))
+	end
+
+	local torch_stack = basic_houses.torch
+	add(torch_stack, pr:next(10, 32))
+	if pr:next(1, 3) == 1 then
+		add(torch_stack, pr:next(10, 32))
+	end
+	if pr:next(1, 3) == 1 then
+		add(torch_stack, pr:next(10, 24))
+	end
+
+	add(basic_houses.bread, pr:next(2, 6))
+
+	add(basic_houses.iron_ingot, pr:next(2, 10))
+	if pr:next(1, 3) == 1 then
+		add(basic_houses.iron_ingot, pr:next(2, 8))
+	end
+
+	add(basic_houses.gold_ingot, pr:next(1, 5))
+	add(basic_houses.gold_lump, pr:next(0, 6))
+
+	add(basic_houses.mese_crystal, pr:next(0, 4))
+	add(basic_houses.bucket_water, pr:next(0, 2))
+
+	if pr:next(1, 8) == 1 then
+		add(basic_houses.tnt, pr:next(1, 3))
+	elseif pr:next(1, 10) == 1 then
+		add(basic_houses.tnt, pr:next(1, 2))
+	end
+
+	if pr:next(1, 12) == 1 then
+		add(basic_houses.mese, pr:next(1, 3))
+	end
+
+	if pr:next(1, 15) == 1 then
+		add(basic_houses.diamond, pr:next(1, 2))
+	elseif pr:next(1, 20) == 1 then
+		add(basic_houses.diamond, 1)
+	end
+end
+
+
 basic_houses.place_chest = function( p, sizex, sizez, chest_places, wall_with_ladder, floor_height, vm, materials, pr )
 	-- not each building needs a chest
 	if( pr:next(1,2)>1 ) then
@@ -465,6 +532,8 @@ basic_houses.place_chest = function( p, sizex, sizez, chest_places, wall_with_la
 		inv:add_item( "main", materials.roof.." "..pr:next(1,99) );
 		inv:add_item( "main", materials.roof_middle.." "..pr:next(1,49) );
 	end
+
+	basic_houses.fill_chest_with_loot(inv, pr);
 end
 
 
