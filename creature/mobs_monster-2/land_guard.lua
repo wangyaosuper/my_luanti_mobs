@@ -44,8 +44,8 @@ mobs:register_mob("mobs_monster:land_guard", {
 	passive = false,
 	attack_type = "dogfight",
 	group_attack = true,
-	reach = 1,
-	damage = 1,
+	reach = 10,
+	damage = 8,
 	hp_min = 3,
 	hp_max = 3,
 	armor = 90,
@@ -74,9 +74,9 @@ mobs:register_mob("mobs_monster:land_guard", {
     	{name = "farming:string", chance = 1, min = 1, max = 2},
 		{name = "default:apple", chance = 1, min = 1, max = 2}
 	},
-	water_damage = 0,
+	water_damage = 6,
 	lava_damage = 6,
-	light_damage = 0,
+	light_damage = 6,
 	fear_height = 8,
 	animation = {
 		stand_start = 0, stand_end = 19,

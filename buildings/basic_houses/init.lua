@@ -57,14 +57,22 @@ basic_houses.houses_generated = 0;
 -- Ensures monster-spawn requests survive server restarts / long delays.
 basic_houses.storage = minetest.get_mod_storage and minetest.get_mod_storage() or nil
 basic_houses.pending_monster_houses = {}
-basic_houses.pending_monster_max = 2000
+basic_houses.pending_monster_max = 4000
 basic_houses._pending_last_scan = 0
-basic_houses.PENDING_SCAN_INTERVAL = 4.0
-basic_houses.PLAYER_ACTIVATION_DIST = 48
-basic_houses.MONSTER_DEDUP_RADIUS = 12
+basic_houses._pending_dirty = false
+basic_houses.PENDING_SCAN_INTERVAL = 2.5
+basic_houses.PLAYER_ACTIVATION_DIST = 80
+basic_houses.PLAYER_ACTIVATION_DIST_CHEST = 120
+basic_houses.MONSTER_DEDUP_RADIUS = 14
+basic_houses.PENDING_MAX_ATTEMPTS_NORMAL = 200
+basic_houses.PENDING_MAX_ATTEMPTS_CHEST = math.huge
 
 local function house_key(p1)
 	return ("%d,%d,%d"):format(p1.x, p1.y, p1.z)
+end
+
+local function mark_pending_dirty()
+	basic_houses._pending_dirty = true
 end
 
 local function save_pending_houses()
@@ -75,9 +83,11 @@ local function save_pending_houses()
 			p1x = h.p1.x, p1y = h.p1.y, p1z = h.p1.z,
 			p2x = h.p2.x, p2y = h.p2.y, p2z = h.p2.z,
 			seed = h.pr_seed,
+			chest = h.has_chest and 1 or 0,
 		})
 	end
 	basic_houses.storage:set_string("pending_monster_houses", minetest.serialize(list))
+	basic_houses._pending_dirty = false
 end
 
 local function load_pending_houses()
@@ -92,7 +102,13 @@ local function load_pending_houses()
 		local k = house_key(p1)
 		if not basic_houses.pending_monster_houses[k] then
 			basic_houses.pending_monster_houses[k] = {
-				p1 = p1, p2 = p2, pr_seed = tonumber(h.seed) or 1,
+				p1 = p1,
+				p2 = p2,
+				pr_seed = tonumber(h.seed) or 1,
+				has_chest = (tonumber(h.chest) or 0) == 1,
+				attempts = 0,
+				next_try_at = 0,
+				added_at = os and os.time and os.time() or 0,
 			}
 		end
 	end
@@ -1095,7 +1111,7 @@ basic_houses.cleanse_immune_to = function(ent)
 end
 
 
-local function try_find_ground(mx, mz, base_y)
+local function try_find_ground_at(mx, mz, base_y)
 	local found_y = nil
 	for y_offset = 0, 5 do
 		local pos_under = {x = mx, y = base_y + y_offset - 1, z = mz}
@@ -1120,6 +1136,68 @@ local function try_find_ground(mx, mz, base_y)
 	return found_y, false
 end
 
+-- Find one valid standing position (walkable below, air/open at +0 and +1) inside the
+-- house box, bounded by the xz slice of a given floor. Scans deterministically with
+-- pr-based jitter so monster placement is varied but still reproducible per attempt.
+-- Returns {x,y,z} or nil. Second return is "blocked by unloaded" boolean.
+local function try_collect_indoor_candidates(p1, p2, pr)
+	local candidates = {}
+	local any_blocked = false
+
+	local xmin = math.min(p1.x, p2.x) + 1
+	local xmax = math.max(p1.x, p2.x) - 1
+	local zmin = math.min(p1.z, p2.z) + 1
+	local zmax = math.max(p1.z, p2.z) - 1
+	local ymin = math.min(p1.y, p2.y)
+	local ymax = math.max(p1.y, p2.y)
+
+	if xmax < xmin or zmax < zmin or ymax <= ymin then
+		return candidates, false
+	end
+
+	local xs = xmax - xmin + 1
+	local zs = zmax - zmin + 1
+	local ys = ymax - ymin + 1
+
+	local sample_count_x = math.min(8, xs)
+	local sample_count_z = math.min(8, zs)
+	local step_x = math.max(1, math.floor(xs / sample_count_x))
+	local step_z = math.max(1, math.floor(zs / sample_count_z))
+
+	for y = ymin, ymax do
+		for x = xmin, xmax, step_x do
+			for z = zmin, zmax, step_z do
+				local jx = x + pr:next(0, math.max(0, step_x - 1))
+				local jz = z + pr:next(0, math.max(0, step_z - 1))
+				jx = math.min(xmax, jx)
+				jz = math.min(zmax, jz)
+				local pos_under = {x = jx, y = y - 1, z = jz}
+				local pos_at = {x = jx, y = y, z = jz}
+				local pos_above = {x = jx, y = y + 1, z = jz}
+				local nu = minetest.get_node_or_nil(pos_under)
+				local na = minetest.get_node_or_nil(pos_at)
+				local nab = minetest.get_node_or_nil(pos_above)
+				if not nu or not na or not nab then
+					any_blocked = true
+				elseif nu.name == "ignore" or na.name == "ignore" or nab.name == "ignore" then
+					any_blocked = true
+				else
+					local nu_def = minetest.registered_nodes[nu.name]
+					local na_def = minetest.registered_nodes[na.name]
+					local nab_def = minetest.registered_nodes[nab.name]
+					local nu_walkable = (nu_def and nu_def.walkable ~= false) or false
+					local na_passable = (na.name == "air") or (na_def and na_def.walkable == false) or false
+					local nab_passable = (nab.name == "air") or (nab_def and nab_def.walkable == false) or false
+					if nu_walkable and na_passable and nab_passable then
+						table.insert(candidates, {x = jx, y = y, z = jz})
+					end
+				end
+			end
+		end
+	end
+	return candidates, any_blocked
+end
+
 local powerful_monster_names = {}
 do
 	local set = {}
@@ -1135,22 +1213,27 @@ local function house_has_monsters_already(p1, p2)
 	local cz = (p1.z + p2.z) / 2
 	local center = {x = cx, y = cy, z = cz}
 	local objs = minetest.get_objects_inside_radius(center, basic_houses.MONSTER_DEDUP_RADIUS)
+	local count = 0
 	for _, obj in ipairs(objs) do
 		if not obj:is_player() then
 			local ent = obj:get_luaentity()
 			if ent and ent.name and powerful_monster_names[ent.name] then
-				return true
+				count = count + 1
+				if count >= 2 then
+					return true
+				end
 			end
 		end
 	end
 	return false
 end
 
-local function any_player_near(p1, p2)
+local function any_player_near(p1, p2, for_chest)
 	local cx = (p1.x + p2.x) / 2
 	local cy = (p1.y + p2.y) / 2
 	local cz = (p1.z + p2.z) / 2
-	local d2 = basic_houses.PLAYER_ACTIVATION_DIST * basic_houses.PLAYER_ACTIVATION_DIST
+	local d = for_chest and basic_houses.PLAYER_ACTIVATION_DIST_CHEST or basic_houses.PLAYER_ACTIVATION_DIST
+	local d2 = d * d
 	local players = minetest.get_connected_players()
 	for _, pl in ipairs(players) do
 		local pp = pl:get_pos()
@@ -1192,9 +1275,6 @@ local function do_apply_single_monster(mob_def, spawn_pos, pr)
 	return true
 end
 
--- Returns: ok (true means we resolved this house: done or definitely no ground)
---          spawned_any (whether at least one monster placed)
---          blocked_by_unloaded (whether failure was due to unloaded chunks -> keep pending)
 local function attempt_spawn_for_house(h, attempt)
 	attempt = attempt or 1
 	if not minetest.global_exists("mobs") then
@@ -1209,29 +1289,67 @@ local function attempt_spawn_for_house(h, attempt)
 	local house_cz = (p1.z + p2.z) / 2
 	local house_cy = p1.y
 
-	local monster_count = pr:next(2, 5)
+	local min_count, max_count
+	if h.has_chest then
+		min_count = 5
+		max_count = 9
+	else
+		min_count = 3
+		max_count = 6
+	end
+	local monster_count = pr:next(min_count, max_count)
+
+	local indoor_candidates, blocked_indoor = try_collect_indoor_candidates(p1, p2, pr)
+
+	local outdoor_target_frac
+	if h.has_chest then
+		outdoor_target_frac = 0.35
+	else
+		outdoor_target_frac = 0.55
+	end
+	local outdoor_count = math.max(1, math.floor(monster_count * outdoor_target_frac + 0.5))
+	local indoor_count = monster_count - outdoor_count
+	if indoor_count > 0 and #indoor_candidates == 0 and not blocked_indoor then
+		outdoor_count = monster_count
+		indoor_count = 0
+	end
+
 	local spawned_any = false
 	local any_blocked = false
-	local any_noground = false
 
-	for i = 1, monster_count do
+	if blocked_indoor then
+		any_blocked = true
+	end
+
+	for i = 1, outdoor_count do
 		local angle = pr:next(0, 360) / 180 * math.pi
-		local dist = pr:next(2, 8)
+		local dist = pr:next(2, 9)
 		local mx = math.floor(house_cx + math.cos(angle) * dist + 0.5)
 		local mz = math.floor(house_cz + math.sin(angle) * dist + 0.5)
-
-		local found_y, blocked = try_find_ground(mx, mz, house_cy)
+		local found_y, blocked = try_find_ground_at(mx, mz, house_cy)
 		if blocked then
 			any_blocked = true
-		elseif found_y == nil then
-			any_noground = true
-		else
+		elseif found_y ~= nil then
 			local mob_def = basic_houses.powerful_monsters[pr:next(1, #basic_houses.powerful_monsters)]
 			local spawn_pos = {x = mx, y = found_y, z = mz}
 			local ok = do_apply_single_monster(mob_def, spawn_pos, pr)
 			if ok then
 				spawned_any = true
 			end
+		end
+	end
+
+	for i = 1, indoor_count do
+		if #indoor_candidates == 0 then
+			break
+		end
+		local idx = pr:next(1, #indoor_candidates)
+		local cand = indoor_candidates[idx]
+		table.remove(indoor_candidates, idx)
+		local mob_def = basic_houses.powerful_monsters[pr:next(1, #basic_houses.powerful_monsters)]
+		local ok = do_apply_single_monster(mob_def, cand, pr)
+		if ok then
+			spawned_any = true
 		end
 	end
 
@@ -1250,6 +1368,7 @@ local function mark_house_monsters_done(key)
 		return false
 	end
 	basic_houses.pending_monster_houses[key] = nil
+	mark_pending_dirty()
 	if basic_houses.storage then
 		pcall(save_pending_houses)
 	end
@@ -1261,7 +1380,7 @@ local function emerge_and_spawn_house(h, key, attempt)
 	local p2 = h.p2
 	local r = 16
 	local e1 = {x = p1.x - r, y = p1.y - 2, z = p1.z - r}
-	local e2 = {x = p2.x + r, y = p2.y + 8, z = p2.z + r}
+	local e2 = {x = p2.x + r, y = p2.y + 10, z = p2.z + r}
 	local function cb(blockpos, action, remaining)
 		if remaining > 0 then
 			return
@@ -1276,7 +1395,9 @@ local function emerge_and_spawn_house(h, key, attempt)
 			return
 		end
 		h.attempts = (h.attempts or 0) + 1
-		if (h.attempts or 0) > 40 then
+		h.next_try_at = minetest.get_us_time() / 1000000 + 6.0
+		local max_attempts = h.has_chest and basic_houses.PENDING_MAX_ATTEMPTS_CHEST or basic_houses.PENDING_MAX_ATTEMPTS_NORMAL
+		if (h.attempts or 0) > max_attempts then
 			mark_house_monsters_done(key)
 			return
 		end
@@ -1290,7 +1411,9 @@ local function emerge_and_spawn_house(h, key, attempt)
 			mark_house_monsters_done(key)
 		else
 			h.attempts = (h.attempts or 0) + 1
-			if (h.attempts or 0) > 40 then
+			h.next_try_at = minetest.get_us_time() / 1000000 + 8.0
+			local max_attempts = h.has_chest and basic_houses.PENDING_MAX_ATTEMPTS_CHEST or basic_houses.PENDING_MAX_ATTEMPTS_NORMAL
+			if (h.attempts or 0) > max_attempts then
 				mark_house_monsters_done(key)
 			end
 		end
@@ -1308,38 +1431,83 @@ local function scan_pending_monster_houses(dtime)
 		return
 	end
 
-	local keys_to_process = {}
+	local now = minetest.get_us_time() / 1000000
+	local all_entries = {}
 	for k, h in pairs(basic_houses.pending_monster_houses) do
-		table.insert(keys_to_process, k)
-		if #keys_to_process >= 16 then
-			break
-		end
+		table.insert(all_entries, {key = k, h = h})
 	end
-	if #keys_to_process == 0 then
+	if #all_entries == 0 then
+		if basic_houses._pending_dirty and basic_houses.storage then
+			pcall(save_pending_houses)
+		end
 		return
 	end
 
-	table.sort(keys_to_process)
+	table.sort(all_entries, function(a, b)
+		local na = a.h.next_try_at or 0
+		local nb = b.h.next_try_at or 0
+		if na ~= nb then
+			return na < nb
+		end
+		local ra = (a.h.added_at or 0)
+		local rb = (b.h.added_at or 0)
+		if ra ~= rb then
+			return ra < rb
+		end
+		return a.key < b.key
+	end)
 
-	for _, k in ipairs(keys_to_process) do
-		local h = basic_houses.pending_monster_houses[k]
-		if not h then
-			-- skip
+	local max_to_process = 64
+	local budget_emerge_chest = math.huge
+	local budget_emerge_normal = 12
+	local emerged_chest = 0
+	local emerged_normal = 0
+	local processed = 0
+
+	for _, entry in ipairs(all_entries) do
+		if processed >= max_to_process then
+			break
+		end
+		local k = entry.key
+		local h = entry.h
+
+		local nt = h.next_try_at or 0
+		if nt > now then
 		else
+			processed = processed + 1
 			if house_has_monsters_already(h.p1, h.p2) then
 				mark_house_monsters_done(k)
-			elseif any_player_near(h.p1, h.p2) then
-				h.attempts = (h.attempts or 0)
-				emerge_and_spawn_house(h, k, (h.attempts or 0) + 1)
+			else
+				local for_chest = (h.has_chest == true)
+				if any_player_near(h.p1, h.p2, for_chest) then
+					local this_attempt = (h.attempts or 0) + 1
+					if for_chest then
+						emerge_and_spawn_house(h, k, this_attempt)
+						emerged_chest = emerged_chest + 1
+					else
+						if emerged_normal < budget_emerge_normal then
+							emerge_and_spawn_house(h, k, this_attempt)
+							emerged_normal = emerged_normal + 1
+						else
+							h.next_try_at = now + basic_houses.PENDING_SCAN_INTERVAL * 2.0
+						end
+					end
+				else
+					h.next_try_at = now + 4.0
+				end
 			end
 		end
+	end
+
+	if basic_houses._pending_dirty and basic_houses.storage then
+		pcall(save_pending_houses)
 	end
 end
 
 minetest.register_globalstep(scan_pending_monster_houses)
 
 
-basic_houses.spawn_powerful_monsters = function(p1, p2, pr)
+basic_houses.spawn_powerful_monsters = function(p1, p2, pr, has_chest)
 	if not p1 or not p2 then
 		return
 	end
@@ -1348,6 +1516,10 @@ basic_houses.spawn_powerful_monsters = function(p1, p2, pr)
 	end
 	local k = house_key(p1)
 	if basic_houses.pending_monster_houses[k] then
+		if has_chest == true then
+			basic_houses.pending_monster_houses[k].has_chest = true
+			mark_pending_dirty()
+		end
 		return
 	end
 
@@ -1363,37 +1535,38 @@ basic_houses.spawn_powerful_monsters = function(p1, p2, pr)
 	if pr_seed < 0 then pr_seed = pr_seed + 2147483647 end
 
 	local n = 0
-	for _ in pairs(basic_houses.pending_monster_houses) do
+	local oldest_k = nil
+	local oldest_at = nil
+	for kk, hh in pairs(basic_houses.pending_monster_houses) do
 		n = n + 1
+		local at = hh.added_at or 0
+		if oldest_at == nil or at < oldest_at then
+			oldest_at = at
+			oldest_k = kk
+		end
 	end
-	if n >= basic_houses.pending_monster_max then
-		local oldest_k = nil
-		local oldest_at = nil
-		for kk, hh in pairs(basic_houses.pending_monster_houses) do
-			local at = hh.added_at or 0
-			if oldest_at == nil or at < oldest_at then
-				oldest_at = at
-				oldest_k = kk
-			end
-		end
-		if oldest_k then
-			basic_houses.pending_monster_houses[oldest_k] = nil
-		end
+	if n >= basic_houses.pending_monster_max and oldest_k then
+		basic_houses.pending_monster_houses[oldest_k] = nil
+		mark_pending_dirty()
 	end
 
 	basic_houses.pending_monster_houses[k] = {
 		p1 = p1,
 		p2 = p2,
 		pr_seed = pr_seed,
+		has_chest = (has_chest == true),
 		attempts = 0,
+		next_try_at = 0,
 		added_at = os and os.time and os.time() or 0,
 	}
+	mark_pending_dirty()
 	if basic_houses.storage then
 		pcall(save_pending_houses)
 	end
 
-	if any_player_near(p1, p2) then
-		minetest.after(1.5, function()
+	local for_chest = (has_chest == true)
+	if any_player_near(p1, p2, for_chest) then
+		minetest.after(1.0, function()
 			local hh = basic_houses.pending_monster_houses[k]
 			if not hh then return end
 			if house_has_monsters_already(p1, p2) then
@@ -1431,7 +1604,8 @@ basic_houses.simple_hut_place_hut = function( data, materials, pr )
 	end
 
 	if hut_pos and hut_pos.p1 and hut_pos.p2 then
-		basic_houses.spawn_powerful_monsters(hut_pos.p1, hut_pos.p2, pr)
+		local has_chest = (hut_pos.chest_info and hut_pos.chest_info.pos and (not hut_pos.chest_info.is_machine)) and true or false
+		basic_houses.spawn_powerful_monsters(hut_pos.p1, hut_pos.p2, pr, has_chest)
 	end
 end
 
