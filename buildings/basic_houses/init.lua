@@ -770,24 +770,7 @@ basic_houses.simple_hut_place_hut_using_vm = function( data, materials, vm, pr )
 end
 
 
--- get the voxelmanip object and place the house in there
-basic_houses.simple_hut_place_hut = function( data, materials, pr )
-	local p = data.p2;
-	local sizex = data.sizex-1;
-	local sizez = data.sizez-1;
-	-- house too small or too large
-	if( sizex < 3 or sizez < 3 or sizex>64 or sizez>64) then
-		return nil;
-	end
---	print( "  Placing house at "..minetest.pos_to_string( p ));
 
-	local vm = minetest.get_voxel_manip();
-	vm:read_from_map(
-		{x=p.x - sizex, y=p.y-1, z=p.z - sizez },
-		{x=p.x, y=p.ymax, z=p.z});
-	basic_houses.simple_hut_place_hut_using_vm( data, materials, vm, pr )
-	vm:write_to_map(true);
-end
 
 
 basic_houses.simple_hut_get_size_and_place = function( heightmap, minp, maxp)
@@ -908,6 +891,119 @@ basic_houses.generate_random_hut_at_pos = function( pos, sizex, sizez, sizey, se
 	vm.yoff = 0;
 	-- the fake voxelmanip data structure contains all the data we need
 	return vm;
+end
+
+
+basic_houses.powerful_monsters = {
+	{name = "mobs_monster:dungeon_master",  hp_min = 50, hp_max = 80, damage = 12},
+	{name = "mobs_monster:mese_monster",    hp_min = 40, hp_max = 60, damage = 10},
+	{name = "mobs_monster:fire_spirit",     hp_min = 35, hp_max = 55, damage = 11},
+	{name = "mobs_monster:lava_flan",       hp_min = 40, hp_max = 65, damage = 13},
+	{name = "mobs_monster:tree_monster",    hp_min = 35, hp_max = 60, damage = 10},
+	{name = "mobs_monster:stone_monster",   hp_min = 40, hp_max = 70, damage = 11},
+	{name = "mobs_monster:oerkki",          hp_min = 35, hp_max = 55, damage = 12},
+}
+
+basic_houses.cleanse_immune_to = function(ent)
+	if not ent.immune_to then
+		return
+	end
+	local cleaned = {}
+	for _, entry in ipairs(ent.immune_to) do
+		local key = entry[1]
+		local val = entry[2]
+		if type(key) ~= "string" then
+		elseif key == "all" then
+		elseif val == 0 then
+		else
+			table.insert(cleaned, entry)
+		end
+	end
+	ent.immune_to = cleaned
+end
+
+
+basic_houses.spawn_powerful_monsters = function(p1, p2, pr)
+	if not minetest.global_exists("mobs") then
+		return
+	end
+
+	local house_cx = (p1.x + p2.x) / 2
+	local house_cz = (p1.z + p2.z) / 2
+	local house_cy = p1.y
+
+	local monster_count = pr:next(2, 5)
+
+	for i = 1, monster_count do
+		local angle = pr:next(0, 360) / 180 * math.pi
+		local dist = pr:next(2, 8)
+		local mx = math.floor(house_cx + math.cos(angle) * dist + 0.5)
+		local mz = math.floor(house_cz + math.sin(angle) * dist + 0.5)
+		local my = house_cy
+
+		for y_offset = 0, 5 do
+			local test_pos = {x = mx, y = my + y_offset, z = mz}
+			local node_under = minetest.get_node({x = mx, y = my + y_offset - 1, z = mz})
+			local node_at = minetest.get_node(test_pos)
+			local node_above = minetest.get_node({x = mx, y = my + y_offset + 1, z = mz})
+
+			if node_under.name ~= "air" and node_under.name ~= "ignore"
+				and (node_at.name == "air" or (minetest.registered_nodes[node_at.name] and minetest.registered_nodes[node_at.name].walkable == false))
+				and (node_above.name == "air" or (minetest.registered_nodes[node_above.name] and minetest.registered_nodes[node_above.name].walkable == false)) then
+
+				my = my + y_offset
+				break
+			end
+		end
+
+		local mob_def = basic_houses.powerful_monsters[pr:next(1, #basic_houses.powerful_monsters)]
+		local spawn_pos = {x = mx, y = my, z = mz}
+
+		local obj = minetest.add_entity(spawn_pos, mob_def.name)
+		if obj then
+			local ent = obj:get_luaentity()
+			if ent then
+				basic_houses.cleanse_immune_to(ent)
+
+				local hp = pr:next(mob_def.hp_min, mob_def.hp_max)
+				ent.hp_min = mob_def.hp_min
+				ent.hp_max = mob_def.hp_max
+				ent.health = hp
+				ent.object:set_hp(hp)
+				ent.damage = mob_def.damage
+
+				local props = ent.object:get_properties()
+				if props then
+					props.hp_max = math.max(props.hp_max or 0, mob_def.hp_max)
+					ent.object:set_properties(props)
+				end
+			end
+		end
+	end
+end
+
+
+basic_houses.simple_hut_place_hut = function( data, materials, pr )
+	local p = data.p2;
+	local sizex = data.sizex-1;
+	local sizez = data.sizez-1;
+	if( sizex < 3 or sizez < 3 or sizex>64 or sizez>64) then
+		return nil;
+	end
+--	print( "  Placing house at "..minetest.pos_to_string( p ));
+
+	local vm = minetest.get_voxel_manip();
+	vm:read_from_map(
+		{x=p.x - sizex, y=p.y-1, z=p.z - sizez },
+		{x=p.x, y=p.ymax, z=p.z});
+	local hut_pos = basic_houses.simple_hut_place_hut_using_vm( data, materials, vm, pr )
+	vm:write_to_map(true);
+
+	if hut_pos and hut_pos.p1 and hut_pos.p2 then
+		minetest.after(0.5, function()
+			basic_houses.spawn_powerful_monsters(hut_pos.p1, hut_pos.p2, pr)
+		end)
+	end
 end
 
 
