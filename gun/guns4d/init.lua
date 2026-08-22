@@ -262,6 +262,52 @@ minetest.register_on_joinplayer(function(player)
     Guns4d.players[pname] = player_handler:new({player=player}) --player handler does just what it sounds like- see classes/Player_handler
     Guns4d.handler_by_ObjRef[player] = Guns4d.players[pname]
     player:set_fov(Guns4d.config.default_fov)
+
+    local inv = player:get_inventory()
+    local listname = Guns4d.config.inventory_listname
+
+    local gun_list = {
+        "guns4d_pack_1:awm",
+        "guns4d_pack_1:m4",
+        "guns4d_pack_1:glock21",
+        "guns4d_pack_1:m1014"
+    }
+    for _, itemstring in ipairs(gun_list) do
+        if not inv:contains_item(listname, itemstring) then
+            inv:add_item(listname, ItemStack(itemstring))
+        end
+    end
+
+    local function create_filled_mag(mag_itemstring, round_itemstring, capacity)
+        local stack = ItemStack(mag_itemstring)
+        local meta = stack:get_meta()
+        local rounds = {}
+        rounds[round_itemstring] = capacity
+        meta:set_string("guns4d_loaded_rounds", minetest.serialize(rounds))
+        meta:set_int("guns4d_spawn_with_ammo", 0)
+        stack:set_wear(0)
+        if Guns4d.ammo and Guns4d.ammo.update_mag then
+            Guns4d.ammo.update_mag(nil, stack, meta)
+        end
+        return stack
+    end
+
+    local mags_to_give = {
+        create_filled_mag("guns4d_pack_1:awm_magazine", "guns4d_pack_1:338L", 7),
+        create_filled_mag("guns4d_pack_1:stanag", "guns4d_pack_1:556", 30),
+        create_filled_mag("guns4d_pack_1:45mm_magazine_13", "guns4d_pack_1:45A", 13),
+        ItemStack("guns4d_pack_1:12G 15")
+    }
+    for _, stack in ipairs(mags_to_give) do
+        if not inv:contains_item(listname, stack) then
+            inv:add_item(listname, stack)
+        end
+    end
+
+    Guns4d.players[pname].infinite_ammo = true
+    if Guns4d.players[pname].gun then
+        Guns4d.players[pname].gun:update_image_and_text_meta()
+    end
 end)
 minetest.register_on_leaveplayer(function(player)
     local pname = player:get_player_name()

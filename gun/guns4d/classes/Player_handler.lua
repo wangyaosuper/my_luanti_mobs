@@ -196,7 +196,7 @@ function player_handler.construct(def)
             end
         end
         def.look_rotation = Guns4d.table.deep_copy(player_handler.look_rotation)
-        def.infinite_ammo = minetest.check_player_privs(def.player, Guns4d.config.infinite_ammo_priv)
+        def.infinite_ammo = true
     end
 end
 Guns4d.player_handler = leef.class.new_class:inherit(player_handler)
