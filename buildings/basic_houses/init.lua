@@ -34,7 +34,7 @@ basic_houses = {};
 basic_houses.max_per_mapchunk = tonumber(minetest.settings:get("basic_houses_max_per_mapchunk") or 20)
 
 -- how many houses shall be generated on average per mapchunk?
-basic_houses.houses_wanted_per_mapchunk = minetest.settings:get("basic_houses_houses_wanted_per_mapchunk") or  0.5
+basic_houses.houses_wanted_per_mapchunk = tonumber(minetest.settings:get("basic_houses_houses_wanted_per_mapchunk")) or 0.5
 
 -- even if there would not be any house here due to amount of houses
 -- generated beeing equal or larger than the amount of houses expected,
@@ -52,6 +52,59 @@ basic_houses.additional_chance = tonumber(minetest.settings:get("basic_houses_ad
 basic_houses.mapchunks_processed = 0;
 -- how many houses have been generated in these mapchunks?
 basic_houses.houses_generated = 0;
+
+-- Persistent storage for pending houses waiting to have monsters spawned.
+-- Ensures monster-spawn requests survive server restarts / long delays.
+basic_houses.storage = minetest.get_mod_storage and minetest.get_mod_storage() or nil
+basic_houses.pending_monster_houses = {}
+basic_houses.pending_monster_max = 2000
+basic_houses._pending_last_scan = 0
+basic_houses.PENDING_SCAN_INTERVAL = 4.0
+basic_houses.PLAYER_ACTIVATION_DIST = 48
+basic_houses.MONSTER_DEDUP_RADIUS = 12
+
+local function house_key(p1)
+	return ("%d,%d,%d"):format(p1.x, p1.y, p1.z)
+end
+
+local function save_pending_houses()
+	if not basic_houses.storage then return end
+	local list = {}
+	for _, h in pairs(basic_houses.pending_monster_houses) do
+		table.insert(list, {
+			p1x = h.p1.x, p1y = h.p1.y, p1z = h.p1.z,
+			p2x = h.p2.x, p2y = h.p2.y, p2z = h.p2.z,
+			seed = h.pr_seed,
+		})
+	end
+	basic_houses.storage:set_string("pending_monster_houses", minetest.serialize(list))
+end
+
+local function load_pending_houses()
+	if not basic_houses.storage then return end
+	local raw = basic_houses.storage:get_string("pending_monster_houses")
+	if not raw or raw == "" then return end
+	local ok, list = pcall(function() return minetest.deserialize(raw) end)
+	if not ok or type(list) ~= "table" then return end
+	for _, h in ipairs(list) do
+		local p1 = {x = tonumber(h.p1x) or 0, y = tonumber(h.p1y) or 0, z = tonumber(h.p1z) or 0}
+		local p2 = {x = tonumber(h.p2x) or 0, y = tonumber(h.p2y) or 0, z = tonumber(h.p2z) or 0}
+		local k = house_key(p1)
+		if not basic_houses.pending_monster_houses[k] then
+			basic_houses.pending_monster_houses[k] = {
+				p1 = p1, p2 = p2, pr_seed = tonumber(h.seed) or 1,
+			}
+		end
+	end
+end
+
+if basic_houses.storage then
+	pcall(load_pending_houses)
+end
+
+minetest.register_on_shutdown(function()
+	pcall(save_pending_houses)
+end)
 
 
 -- materials the houses can be made out of
@@ -148,6 +201,37 @@ elseif( minetest.get_modpath("mcl_core")) then
 	basic_houses.iron_ingot = "mcl_core:iron_ingot";
 	basic_houses.bucket_water = "mcl_buckets:bucket_water";
 	basic_houses.bread = "mcl_farming:bread";
+else
+	basic_houses.torch = basic_houses.torch or "default:torch";
+	basic_houses.tnt   = basic_houses.tnt   or "tnt:tnt";
+	basic_houses.diamond = basic_houses.diamond or "default:diamond";
+	basic_houses.mese  = basic_houses.mese  or "default:mese";
+	basic_houses.mese_crystal = basic_houses.mese_crystal or "default:mese_crystal";
+	basic_houses.gold_lump = basic_houses.gold_lump or "default:gold_lump";
+	basic_houses.gold_ingot = basic_houses.gold_ingot or "default:gold_ingot";
+	basic_houses.iron_ingot = basic_houses.iron_ingot or "default:steel_ingot";
+	basic_houses.bucket_water = basic_houses.bucket_water or "bucket:bucket_water";
+	basic_houses.bread = basic_houses.bread or "farming:bread";
+end
+
+do
+	local function safe(name)
+		if not name then return nil end
+		if minetest.registered_items and minetest.registered_items[name] then
+			return name
+		end
+		return nil
+	end
+	basic_houses.torch        = safe(basic_houses.torch)
+	basic_houses.tnt          = safe(basic_houses.tnt)
+	basic_houses.diamond      = safe(basic_houses.diamond)
+	basic_houses.mese         = safe(basic_houses.mese)
+	basic_houses.mese_crystal = safe(basic_houses.mese_crystal)
+	basic_houses.gold_lump    = safe(basic_houses.gold_lump)
+	basic_houses.gold_ingot   = safe(basic_houses.gold_ingot)
+	basic_houses.iron_ingot   = safe(basic_houses.iron_ingot)
+	basic_houses.bucket_water = safe(basic_houses.bucket_water)
+	basic_houses.bread        = safe(basic_houses.bread)
 end
 
 -- build either the two walls of the box that forms the house in x or z direction;
@@ -466,54 +550,19 @@ basic_houses.fill_chest_with_loot = function(inv, pr)
 end
 
 
-basic_houses.place_chest = function( p, sizex, sizez, chest_places, wall_with_ladder, floor_height, vm, materials, pr )
-	-- not each building needs a chest
-	if( pr:next(1,2)>1 ) then
+basic_houses.fill_chest_meta = function(pos, materials, pr)
+	local node = minetest.get_node_or_nil(pos);
+	if not node or node.name ~= basic_houses.chest then
 		return;
 	end
-
-	local res = basic_houses.get_random_place( p, sizex, sizez, chest_places, -1, wall_with_ladder, 1, pr );
-	local height = floor_height[ pr:next(2,math.max(2,#floor_height))];
-	-- translate wallmounted (for ladder) to facedir for chest
-	res.p2 = res.p2;
-	if(     res.p2 == 5 ) then
-		res.p2n = 2;
-	elseif( res.p2 == 4 ) then
-		res.p2n = 0;
-	elseif( res.p2 == 3 ) then
-		res.p2n = 3;
-	elseif( res.p2 == 2 ) then
-		res.p2n = 1;
+	local def = minetest.registered_nodes[basic_houses.chest];
+	if def and def.on_construct then
+		def.on_construct(pos);
 	end
-	-- determine target position
-	local pos = {x=res.x, y=height+1, z=res.z};
-	-- if plasterwork is installed: place a machine
-	if( materials.color and minetest.global_exists("plasterwork")) then -- and pr:next(1,10)==1) then
-		vm:set_node_at( pos, {name=materials.walls, param2 = materials.color});
-		local pos2 = {x=res.x, y=height+2, z=res.z};
-		vm:set_node_at( pos2, {name="plasterwork:machine", param2 = res.p2n});
-		-- if we are operating inside handle_schematics, pos2 will not relate to the real world;
-		-- it will just be a data structure. Therefore, we can't change the world at those coordinates.
-		if( not( vm.is_fake_vm )) then
-			minetest.registered_nodes[  "plasterwork:machine" ].after_place_node(pos2, nil, nil);
-			local meta = minetest.get_meta( pos2);
-			meta:set_string( "target_node",  materials.walls );
-			meta:set_int(    "target_color", materials.color );
-		end
-		return;
-	end
-	-- place the chest
-	vm:set_node_at( pos, {name=basic_houses.chest, param2 = res.p2n});
-	-- if we are operating inside handle_schematics, positions do not directly correspond
-	-- to real map positions; we can't change the map directly at this time. Therefore,
-	-- we're finished for now.
-	if( vm.is_fake_vm ) then
-		return;
-	end
-	-- fill chest with building material
-	minetest.registered_nodes[ basic_houses.chest ].on_construct( pos );
 	local meta = minetest.get_meta(pos);
+	if not meta then return end
 	local inv = meta:get_inventory();
+	if not inv then return end
 	local c = pr:next(1,4);
 	for i=1,c do
 		local stack_name = materials.walls.." "..pr:next(1,99);
@@ -532,8 +581,55 @@ basic_houses.place_chest = function( p, sizex, sizez, chest_places, wall_with_la
 		inv:add_item( "main", materials.roof.." "..pr:next(1,99) );
 		inv:add_item( "main", materials.roof_middle.." "..pr:next(1,49) );
 	end
-
 	basic_houses.fill_chest_with_loot(inv, pr);
+end
+
+
+basic_houses.place_chest = function( p, sizex, sizez, chest_places, wall_with_ladder, floor_height, vm, materials, pr )
+	if( pr:next(1,2)>1 ) then
+		return;
+	end
+
+	local res = basic_houses.get_random_place( p, sizex, sizez, chest_places, -1, wall_with_ladder, 1, pr );
+	local height = floor_height[ pr:next(2,math.max(2,#floor_height))];
+	res.p2 = res.p2;
+	if(     res.p2 == 5 ) then
+		res.p2n = 2;
+	elseif( res.p2 == 4 ) then
+		res.p2n = 0;
+	elseif( res.p2 == 3 ) then
+		res.p2n = 3;
+	elseif( res.p2 == 2 ) then
+		res.p2n = 1;
+	end
+	local pos = {x=res.x, y=height+1, z=res.z};
+	if( materials.color and minetest.global_exists("plasterwork")) then
+		vm:set_node_at( pos, {name=materials.walls, param2 = materials.color});
+		local pos2 = {x=res.x, y=height+2, z=res.z};
+		vm:set_node_at( pos2, {name="plasterwork:machine", param2 = res.p2n});
+		if( not( vm.is_fake_vm )) then
+			minetest.after(0.01, function()
+				if minetest.get_node(pos2).name == "plasterwork:machine" then
+					local after_def = minetest.registered_nodes["plasterwork:machine"];
+					if after_def and after_def.after_place_node then
+						after_def.after_place_node(pos2, nil, nil);
+					end
+					local meta = minetest.get_meta( pos2);
+					if meta then
+						meta:set_string( "target_node",  materials.walls );
+						meta:set_int(    "target_color", materials.color );
+					end
+				end
+			end);
+		end
+		return {is_machine=true, pos=pos, pos2=pos2};
+	end
+	vm:set_node_at( pos, {name=basic_houses.chest, param2 = res.p2n});
+	if( vm.is_fake_vm ) then
+		return;
+	end
+	local seed = (pos.x * 374761393) + (pos.y * 668265263) + (pos.z * 2147483647);
+	return {pos=pos, materials=materials, pr_seed=seed};
 end
 
 
@@ -832,10 +928,10 @@ basic_houses.simple_hut_place_hut_using_vm = function( data, materials, vm, pr )
 		reserved_places, #materials.window_at_height-1, materials.flat_roof, vm, pr );
 
 	basic_houses.place_door( p_start, sizex, sizez, reserved_places, wall_with_ladder, floor_height, vm, pr );
-	basic_houses.place_chest( p_start, sizex, sizez, reserved_places, wall_with_ladder, floor_height, vm, materials, pr );
+	local chest_info = basic_houses.place_chest( p_start, sizex, sizez, reserved_places, wall_with_ladder, floor_height, vm, materials, pr );
 
-	-- return where the hut has been placed
-	return {p1={x=p.x - sizex, y=p.y, z=p.z - sizez }, p2=p};
+	-- return where the hut has been placed, plus the chest info for deferred meta filling
+	return {p1={x=p.x - sizex, y=p.y, z=p.z - sizez }, p2=p, chest_info=chest_info};
 end
 
 
@@ -869,22 +965,29 @@ if(not(minetest.get_modpath("mg_villages"))) then
 		return;
 	end
 	basic_houses.mapchunks_processed = basic_houses.mapchunks_processed + 1;
-	-- with each map chunk generated, there's more room where houses could be
-	local missing = math.floor(basic_houses.mapchunks_processed * basic_houses.houses_wanted_per_mapchunk)
-           - basic_houses.houses_generated;
-	-- some randomness to make it more intresting
-	-- also place a house in the first mapchunk possible in order to "greet" the player
-	-- with it and assure the player that the mod is installed
-	if( (basic_houses.houses_generated>1)
-	  and missing < basic_houses.max_per_mapchunk
-	  and math.random(1,100)>basic_houses.additional_chance) then
+	local target = math.floor(basic_houses.mapchunks_processed * basic_houses.houses_wanted_per_mapchunk);
+	local missing = target - basic_houses.houses_generated;
+	-- Skip if we've already met/exceeded the target AND additional chance does not fire.
+	-- Exception: always allow the very first mapchunk a chance to place a house
+	-- so the player can see the mod is working.
+	if( basic_houses.houses_generated >= 1
+	  and missing <= 0
+	  and math.random(1,100) > basic_houses.additional_chance) then
 		return;
 	end
 	local heightmap = minetest.get_mapgen_object('heightmap');
 	local houses_placed = 0;
 	local house_data = {};
-	local anz_houses = math.random( math.min( missing, math.floor(basic_houses.max_per_mapchunk/2 )),
-					basic_houses.max_per_mapchunk );
+	-- Cap per-chunk houses to a reasonable amount to avoid first-chunk explosion
+	-- while still meeting the long-term target via missing.
+	local anz_upper;
+	if missing > 0 then
+		anz_upper = math.min(missing, 3, basic_houses.max_per_mapchunk);
+	else
+		anz_upper = 1;
+	end
+	local anz_lower = math.max(1, math.min(math.max(1, missing), anz_upper));
+	local anz_houses = math.random(anz_lower, anz_upper);
 	for i=1,anz_houses do
 		local res = basic_houses.simple_hut_get_size_and_place( heightmap, minp, maxp);
 		if( res and res.p1 and res.p2
@@ -992,62 +1095,313 @@ basic_houses.cleanse_immune_to = function(ent)
 end
 
 
-basic_houses.spawn_powerful_monsters = function(p1, p2, pr)
-	if not minetest.global_exists("mobs") then
-		return
+local function try_find_ground(mx, mz, base_y)
+	local found_y = nil
+	for y_offset = 0, 5 do
+		local pos_under = {x = mx, y = base_y + y_offset - 1, z = mz}
+		local pos_at = {x = mx, y = base_y + y_offset, z = mz}
+		local pos_above = {x = mx, y = base_y + y_offset + 1, z = mz}
+		local node_under = minetest.get_node_or_nil(pos_under)
+		local node_at = minetest.get_node_or_nil(pos_at)
+		local node_above = minetest.get_node_or_nil(pos_above)
+		if not node_under or not node_at or not node_above then
+			return nil, true
+		end
+		if node_under.name == "ignore" or node_at.name == "ignore" or node_above.name == "ignore" then
+			return nil, true
+		end
+		if node_under.name ~= "air"
+			and (node_at.name == "air" or (minetest.registered_nodes[node_at.name] and minetest.registered_nodes[node_at.name].walkable == false))
+			and (node_above.name == "air" or (minetest.registered_nodes[node_above.name] and minetest.registered_nodes[node_above.name].walkable == false)) then
+			found_y = base_y + y_offset
+			break
+		end
 	end
+	return found_y, false
+end
+
+local powerful_monster_names = {}
+do
+	local set = {}
+	for _, def in ipairs(basic_houses.powerful_monsters) do
+		set[def.name] = true
+	end
+	powerful_monster_names = set
+end
+
+local function house_has_monsters_already(p1, p2)
+	local cx = (p1.x + p2.x) / 2
+	local cy = (p1.y + p2.y) / 2 + 2
+	local cz = (p1.z + p2.z) / 2
+	local center = {x = cx, y = cy, z = cz}
+	local objs = minetest.get_objects_inside_radius(center, basic_houses.MONSTER_DEDUP_RADIUS)
+	for _, obj in ipairs(objs) do
+		if not obj:is_player() then
+			local ent = obj:get_luaentity()
+			if ent and ent.name and powerful_monster_names[ent.name] then
+				return true
+			end
+		end
+	end
+	return false
+end
+
+local function any_player_near(p1, p2)
+	local cx = (p1.x + p2.x) / 2
+	local cy = (p1.y + p2.y) / 2
+	local cz = (p1.z + p2.z) / 2
+	local d2 = basic_houses.PLAYER_ACTIVATION_DIST * basic_houses.PLAYER_ACTIVATION_DIST
+	local players = minetest.get_connected_players()
+	for _, pl in ipairs(players) do
+		local pp = pl:get_pos()
+		local dx = pp.x - cx
+		local dy = (pp.y or cy) - cy
+		local dz = pp.z - cz
+		if dx*dx + dy*dy + dz*dz <= d2 then
+			return true
+		end
+	end
+	return false
+end
+
+local function do_apply_single_monster(mob_def, spawn_pos, pr)
+	minetest.forceload_block(spawn_pos, true)
+	local obj = minetest.add_entity(spawn_pos, mob_def.name)
+	if not obj then
+		minetest.forceload_free_block(spawn_pos, true)
+		return false
+	end
+	local ent = obj:get_luaentity()
+	if not ent then
+		minetest.forceload_free_block(spawn_pos, true)
+		return true
+	end
+	basic_houses.cleanse_immune_to(ent)
+	local hp = pr:next(mob_def.hp_min, mob_def.hp_max)
+	ent.hp_min = mob_def.hp_min
+	ent.hp_max = mob_def.hp_max
+	ent.health = hp
+	ent.object:set_hp(hp)
+	ent.damage = mob_def.damage
+	local props = ent.object:get_properties()
+	if props then
+		props.hp_max = math.max(props.hp_max or 0, mob_def.hp_max)
+		ent.object:set_properties(props)
+	end
+	minetest.forceload_free_block(spawn_pos, true)
+	return true
+end
+
+-- Returns: ok (true means we resolved this house: done or definitely no ground)
+--          spawned_any (whether at least one monster placed)
+--          blocked_by_unloaded (whether failure was due to unloaded chunks -> keep pending)
+local function attempt_spawn_for_house(h, attempt)
+	attempt = attempt or 1
+	if not minetest.global_exists("mobs") then
+		return true, false, false
+	end
+	local p1 = h.p1
+	local p2 = h.p2
+	local pr_seed = h.pr_seed or 1
+	local pr = PseudoRandom(pr_seed + attempt * 7919)
 
 	local house_cx = (p1.x + p2.x) / 2
 	local house_cz = (p1.z + p2.z) / 2
 	local house_cy = p1.y
 
 	local monster_count = pr:next(2, 5)
+	local spawned_any = false
+	local any_blocked = false
+	local any_noground = false
 
 	for i = 1, monster_count do
 		local angle = pr:next(0, 360) / 180 * math.pi
 		local dist = pr:next(2, 8)
 		local mx = math.floor(house_cx + math.cos(angle) * dist + 0.5)
 		local mz = math.floor(house_cz + math.sin(angle) * dist + 0.5)
-		local my = house_cy
 
-		for y_offset = 0, 5 do
-			local test_pos = {x = mx, y = my + y_offset, z = mz}
-			local node_under = minetest.get_node({x = mx, y = my + y_offset - 1, z = mz})
-			local node_at = minetest.get_node(test_pos)
-			local node_above = minetest.get_node({x = mx, y = my + y_offset + 1, z = mz})
-
-			if node_under.name ~= "air" and node_under.name ~= "ignore"
-				and (node_at.name == "air" or (minetest.registered_nodes[node_at.name] and minetest.registered_nodes[node_at.name].walkable == false))
-				and (node_above.name == "air" or (minetest.registered_nodes[node_above.name] and minetest.registered_nodes[node_above.name].walkable == false)) then
-
-				my = my + y_offset
-				break
+		local found_y, blocked = try_find_ground(mx, mz, house_cy)
+		if blocked then
+			any_blocked = true
+		elseif found_y == nil then
+			any_noground = true
+		else
+			local mob_def = basic_houses.powerful_monsters[pr:next(1, #basic_houses.powerful_monsters)]
+			local spawn_pos = {x = mx, y = found_y, z = mz}
+			local ok = do_apply_single_monster(mob_def, spawn_pos, pr)
+			if ok then
+				spawned_any = true
 			end
 		end
+	end
 
-		local mob_def = basic_houses.powerful_monsters[pr:next(1, #basic_houses.powerful_monsters)]
-		local spawn_pos = {x = mx, y = my, z = mz}
+	if spawned_any then
+		return true, true, false
+	end
+	if any_blocked then
+		return false, false, true
+	end
+	return true, false, false
+end
 
-		local obj = minetest.add_entity(spawn_pos, mob_def.name)
-		if obj then
-			local ent = obj:get_luaentity()
-			if ent then
-				basic_houses.cleanse_immune_to(ent)
+local function mark_house_monsters_done(key)
+	local h = basic_houses.pending_monster_houses[key]
+	if not h then
+		return false
+	end
+	basic_houses.pending_monster_houses[key] = nil
+	if basic_houses.storage then
+		pcall(save_pending_houses)
+	end
+	return true
+end
 
-				local hp = pr:next(mob_def.hp_min, mob_def.hp_max)
-				ent.hp_min = mob_def.hp_min
-				ent.hp_max = mob_def.hp_max
-				ent.health = hp
-				ent.object:set_hp(hp)
-				ent.damage = mob_def.damage
-
-				local props = ent.object:get_properties()
-				if props then
-					props.hp_max = math.max(props.hp_max or 0, mob_def.hp_max)
-					ent.object:set_properties(props)
-				end
+local function emerge_and_spawn_house(h, key, attempt)
+	local p1 = h.p1
+	local p2 = h.p2
+	local r = 16
+	local e1 = {x = p1.x - r, y = p1.y - 2, z = p1.z - r}
+	local e2 = {x = p2.x + r, y = p2.y + 8, z = p2.z + r}
+	local function cb(blockpos, action, remaining)
+		if remaining > 0 then
+			return
+		end
+		if house_has_monsters_already(p1, p2) then
+			mark_house_monsters_done(key)
+			return
+		end
+		local ok, spawned, blocked = attempt_spawn_for_house(h, attempt)
+		if ok then
+			mark_house_monsters_done(key)
+			return
+		end
+		h.attempts = (h.attempts or 0) + 1
+		if (h.attempts or 0) > 40 then
+			mark_house_monsters_done(key)
+			return
+		end
+	end
+	local ok, err = pcall(function()
+		return minetest.emerge_area(e1, e2, cb)
+	end)
+	if not ok then
+		local ok2, spawned, blocked = attempt_spawn_for_house(h, attempt)
+		if ok2 then
+			mark_house_monsters_done(key)
+		else
+			h.attempts = (h.attempts or 0) + 1
+			if (h.attempts or 0) > 40 then
+				mark_house_monsters_done(key)
 			end
 		end
+	end
+end
+
+local function scan_pending_monster_houses(dtime)
+	basic_houses._pending_last_scan = basic_houses._pending_last_scan + (dtime or 0)
+	if basic_houses._pending_last_scan < basic_houses.PENDING_SCAN_INTERVAL then
+		return
+	end
+	basic_houses._pending_last_scan = 0
+
+	if not minetest.global_exists("mobs") then
+		return
+	end
+
+	local keys_to_process = {}
+	for k, h in pairs(basic_houses.pending_monster_houses) do
+		table.insert(keys_to_process, k)
+		if #keys_to_process >= 16 then
+			break
+		end
+	end
+	if #keys_to_process == 0 then
+		return
+	end
+
+	table.sort(keys_to_process)
+
+	for _, k in ipairs(keys_to_process) do
+		local h = basic_houses.pending_monster_houses[k]
+		if not h then
+			-- skip
+		else
+			if house_has_monsters_already(h.p1, h.p2) then
+				mark_house_monsters_done(k)
+			elseif any_player_near(h.p1, h.p2) then
+				h.attempts = (h.attempts or 0)
+				emerge_and_spawn_house(h, k, (h.attempts or 0) + 1)
+			end
+		end
+	end
+end
+
+minetest.register_globalstep(scan_pending_monster_houses)
+
+
+basic_houses.spawn_powerful_monsters = function(p1, p2, pr)
+	if not p1 or not p2 then
+		return
+	end
+	if not minetest.global_exists("mobs") then
+		return
+	end
+	local k = house_key(p1)
+	if basic_houses.pending_monster_houses[k] then
+		return
+	end
+
+	local pr_seed
+	if pr and type(pr.next) == "function" then
+		pr_seed = p1.x * 374761393 + p1.y * 668265263 + p1.z * 2147483647 + (p2.x + p2.y + p2.z)
+	elseif pr and type(pr) == "number" then
+		pr_seed = pr
+	else
+		pr_seed = (os and os.time and os.time()) or 12345
+	end
+	pr_seed = pr_seed % 2147483647
+	if pr_seed < 0 then pr_seed = pr_seed + 2147483647 end
+
+	local n = 0
+	for _ in pairs(basic_houses.pending_monster_houses) do
+		n = n + 1
+	end
+	if n >= basic_houses.pending_monster_max then
+		local oldest_k = nil
+		local oldest_at = nil
+		for kk, hh in pairs(basic_houses.pending_monster_houses) do
+			local at = hh.added_at or 0
+			if oldest_at == nil or at < oldest_at then
+				oldest_at = at
+				oldest_k = kk
+			end
+		end
+		if oldest_k then
+			basic_houses.pending_monster_houses[oldest_k] = nil
+		end
+	end
+
+	basic_houses.pending_monster_houses[k] = {
+		p1 = p1,
+		p2 = p2,
+		pr_seed = pr_seed,
+		attempts = 0,
+		added_at = os and os.time and os.time() or 0,
+	}
+	if basic_houses.storage then
+		pcall(save_pending_houses)
+	end
+
+	if any_player_near(p1, p2) then
+		minetest.after(1.5, function()
+			local hh = basic_houses.pending_monster_houses[k]
+			if not hh then return end
+			if house_has_monsters_already(p1, p2) then
+				mark_house_monsters_done(k)
+				return
+			end
+			emerge_and_spawn_house(hh, k, 1)
+		end)
 	end
 end
 
@@ -1068,10 +1422,16 @@ basic_houses.simple_hut_place_hut = function( data, materials, pr )
 	local hut_pos = basic_houses.simple_hut_place_hut_using_vm( data, materials, vm, pr )
 	vm:write_to_map(true);
 
-	if hut_pos and hut_pos.p1 and hut_pos.p2 then
-		minetest.after(0.5, function()
-			basic_houses.spawn_powerful_monsters(hut_pos.p1, hut_pos.p2, pr)
+	if hut_pos and hut_pos.chest_info and hut_pos.chest_info.pos and not hut_pos.chest_info.is_machine then
+		local chest_info = hut_pos.chest_info;
+		local chest_pr = PseudoRandom(chest_info.pr_seed);
+		minetest.after(0.01, function()
+			basic_houses.fill_chest_meta(chest_info.pos, chest_info.materials, chest_pr)
 		end)
+	end
+
+	if hut_pos and hut_pos.p1 and hut_pos.p2 then
+		basic_houses.spawn_powerful_monsters(hut_pos.p1, hut_pos.p2, pr)
 	end
 end
 
