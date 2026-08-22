@@ -174,86 +174,109 @@ local function generate_dungeon_map(width, rim_sealed, level_above)
 	-- divert tiles into groups, each of whom is one coherently accessible area
 	local dungeon_groups = {}
 	local free_tiles = {}
+	local free_tiles_set = {}
+	local function tile_key(tx, tz)
+		return tx * 10000 + tz
+	end
 	for x = 1, width do
 		for z = 1, width do
 			if not (map[x][z].x_minus==false and map[x][z].x_plus==false and map[x][z].z_minus==false and map[x][z].z_plus==false) then
-				table.insert(free_tiles, {x, z})
-			end
-		end
-	end
-	local function contains(table, value)
-		for i=1,#table do
-			if table[i][1] == value[1] and table[i][2] == value[2] then 
-				return true
-			end
-		end
-		return false
-	end
-	local function remove_from_array(array, value)
-		for i, v in ipairs(array) do
-			if v[1] == value[1] and v[2] == value[2] then
-				table.remove(array, i)
-				return
+				local tk = tile_key(x, z)
+				free_tiles_set[tk] = {x, z}
+				table.insert(free_tiles, tk)
 			end
 		end
 	end
 	while #free_tiles > 0 do
 		local new_group = {}
-		local unchecked_tiles = {table.remove(free_tiles, 1)} -- tiles of the new group whose nighbors we haven't checked yet
+		local new_group_set = {}
+		local unchecked_tiles = {}
+		local first_key = table.remove(free_tiles, 1)
+		free_tiles_set[first_key] = nil
+		table.insert(unchecked_tiles, first_key)
 		while #unchecked_tiles > 0 do
-			local unchecked_tile = table.remove(unchecked_tiles, 1)
-			table.insert(new_group, unchecked_tile)
-			x, z = unpack(unchecked_tile)
+			local unchecked_key = table.remove(unchecked_tiles, 1)
+			table.insert(new_group, unchecked_key)
+			new_group_set[unchecked_key] = true
+			local unchecked_data = free_tiles_set[unchecked_key] or (function()
+				local tx = math.floor(unchecked_key / 10000)
+				local tz = unchecked_key - tx * 10000
+				return {tx, tz}
+			end)()
+			x, z = unchecked_data[1], unchecked_data[2]
 			if x > 1 and map[x][z].x_minus then
 				if map[x-1][z].x_plus then
-					if not contains(new_group, {x-1, z}) and not contains(unchecked_tiles, {x-1, z}) then
-						table.insert(unchecked_tiles, {x-1, z})
-						remove_from_array(free_tiles, {x-1, z})
+					local nk = tile_key(x-1, z)
+					if not new_group_set[nk] then
+						if free_tiles_set[nk] then
+							free_tiles_set[nk] = nil
+							table.insert(unchecked_tiles, nk)
+						end
 					end
 				else
-					map[x][z].stair_position = "x_minus"   -- we also check for the special case of dead ends and make them staircases here
-					map[x][z].stair_orientation = table.remove({"z_minus", "z_plus"}, math.random(1, 2))
+					map[x][z].stair_position = "x_minus"
+					local options = {"z_minus", "z_plus"}
+					map[x][z].stair_orientation = table.remove(options, math.random(1, 2))
 					map[x][z].is_dead_end = true
 				end
 			end
 			if x < width and map[x][z].x_plus then
 				if map[x+1][z].x_minus then
-					if not contains(new_group, {x+1, z}) and not contains(unchecked_tiles, {x+1, z}) then
-						table.insert(unchecked_tiles, {x+1, z})
-						remove_from_array(free_tiles, {x+1, z})
+					local nk = tile_key(x+1, z)
+					if not new_group_set[nk] then
+						if free_tiles_set[nk] then
+							free_tiles_set[nk] = nil
+							table.insert(unchecked_tiles, nk)
+						end
 					end
 				else
 					map[x][z].stair_position = "x_plus"
-					map[x][z].stair_orientation = table.remove({"z_minus", "z_plus"}, math.random(1, 2))
+					local options = {"z_minus", "z_plus"}
+					map[x][z].stair_orientation = table.remove(options, math.random(1, 2))
 					map[x][z].is_dead_end = true
 				end
 			end
 			if z > 1 and map[x][z].z_minus then
 				if map[x][z-1].z_plus then
-					if not contains(new_group, {x, z-1}) and not contains(unchecked_tiles, {x, z-1}) then
-						table.insert(unchecked_tiles, {x, z-1})
-						remove_from_array(free_tiles, {x, z-1})
+					local nk = tile_key(x, z-1)
+					if not new_group_set[nk] then
+						if free_tiles_set[nk] then
+							free_tiles_set[nk] = nil
+							table.insert(unchecked_tiles, nk)
+						end
 					end
 				else
 					map[x][z].stair_position = "z_minus"
-					map[x][z].stair_orientation = table.remove({"x_minus", "x_plus"}, math.random(1, 2))
+					local options = {"x_minus", "x_plus"}
+					map[x][z].stair_orientation = table.remove(options, math.random(1, 2))
 					map[x][z].is_dead_end = true
 				end
 			end
 			if z < width and map[x][z].z_plus then
 				if map[x][z+1].z_minus then
-					if not contains(new_group, {x, z+1}) and not contains(unchecked_tiles, {x, z+1}) then
-						table.insert(unchecked_tiles, {x, z+1})
-						remove_from_array(free_tiles, {x, z+1})
+					local nk = tile_key(x, z+1)
+					if not new_group_set[nk] then
+						if free_tiles_set[nk] then
+							free_tiles_set[nk] = nil
+							table.insert(unchecked_tiles, nk)
+						end
 					end
 				else
 					map[x][z].stair_position = "z_plus"
-					map[x][z].stair_orientation = table.remove({"x_minus", "x_plus"}, math.random(1, 2))
+					local options = {"x_minus", "x_plus"}
+					map[x][z].stair_orientation = table.remove(options, math.random(1, 2))
 					map[x][z].is_dead_end = true
 				end
 			end
 		end
-		table.insert(dungeon_groups, new_group)
+		local decoded_group = {}
+		for i = 1, #new_group do
+			local k = new_group[i]
+			local tx = math.floor(k / 10000)
+			local tz = k - tx * 10000
+			table.insert(decoded_group, {tx, tz})
+		end
+		table.insert(dungeon_groups, decoded_group)
 	end
 	-- remove tiles from groups if we can't give them stairs bc of empty tiles above them
 	if level_above then

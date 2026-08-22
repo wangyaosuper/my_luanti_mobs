@@ -51,13 +51,22 @@ local function make_waterlilie(pos)
 end
 
 local function make_glowstick(pos)
-    local apple_wood = #minetest.find_nodes_in_area({x=pos.x-20, y=pos.y-20, z=pos.z-20}, {x=pos.x+20, y=pos.y+20, z=pos.z+20}, {"default:wood"})
-    local pine_wood = #minetest.find_nodes_in_area({x=pos.x-20, y=pos.y-20, z=pos.z-20}, {x=pos.x+20, y=pos.y+20, z=pos.z+20}, {"default:pine_wood"})
-    local aspen_wood = #minetest.find_nodes_in_area({x=pos.x-20, y=pos.y-20, z=pos.z-20}, {x=pos.x+20, y=pos.y+20, z=pos.z+20}, {"default:aspen_wood"})
-    local acacia_wood = #minetest.find_nodes_in_area({x=pos.x-20, y=pos.y-20, z=pos.z-20}, {x=pos.x+20, y=pos.y+20, z=pos.z+20}, {"default:acacia_wood"})
+    local p1 = {x=pos.x-20, y=pos.y-20, z=pos.z-20}
+    local p2 = {x=pos.x+20, y=pos.y+20, z=pos.z+20}
+    local wood_positions = minetest.find_nodes_in_area(p1, p2,
+        {"default:wood", "default:pine_wood", "default:aspen_wood", "default:acacia_wood"})
+    local apple_wood, pine_wood, aspen_wood, acacia_wood = 0, 0, 0, 0
+    for i = 1, #wood_positions do
+        local name = minetest.get_node(wood_positions[i]).name
+        if name == "default:wood" then apple_wood = apple_wood + 1
+        elseif name == "default:pine_wood" then pine_wood = pine_wood + 1
+        elseif name == "default:aspen_wood" then aspen_wood = aspen_wood + 1
+        elseif name == "default:acacia_wood" then acacia_wood = acacia_wood + 1
+        end
+    end
     local max_wood = math.max(apple_wood, pine_wood, aspen_wood, acacia_wood)
 
-    local mese_lamp_type = apple_wood == max_wood and "default:mese_post_light" or 
+    local mese_lamp_type = apple_wood == max_wood and "default:mese_post_light" or
                            pine_wood == max_wood and "default:mese_post_light_pine_wood" or
                            aspen_wood == max_wood and "default:mese_post_light_aspen_wood" or
                            acacia_wood == max_wood and "default:mese_post_light_acacia_wood"

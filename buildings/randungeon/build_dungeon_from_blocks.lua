@@ -54,76 +54,103 @@ local freeze_frozen_levels = frozen_levels_functions.freeze_frozen_levels
 -- Local Helper Functions
 --
 
+local node_def_cache = {}
+setmetatable(node_def_cache, {__index = function(t, k)
+	local def = minetest.registered_nodes[k]
+	t[k] = def
+	return def
+end})
+
+local water_groups = {"group:water"}
+local igniter_groups = {"group:igniter"}
+
+local function get_meta_flags(pos)
+	local meta = minetest.get_meta(pos)
+	local dont_replace = meta:get_string("dont_replace_with_air") == "true"
+	local must_fireproof = meta:get_string("must_be_fireproof") == "true"
+	local fireproof_alt = nil
+	if must_fireproof then
+		fireproof_alt = meta:get_string("fireproof_alternative")
+	end
+	return dont_replace, must_fireproof, fireproof_alt, meta
+end
+
 local function set_structure_block(pos, name, only_replace_solid_blocks, dont_replace_pool_blocks)
 	local old_node_name = minetest.get_node(pos).name
-	-- turn cobble around water into mossy cobble
-	if name == "default:cobble" and minetest.find_node_near(pos, 1, {"group:water"}) then
-		if math.random() < 0.5 then
-			name = "default:mossycobble"
-		else
-			name = "randungeon:unmossy_cobble"
+	if name == "default:cobble" then
+		if minetest.find_node_near(pos, 1, water_groups) then
+			if math.random() < 0.5 then
+				name = "default:mossycobble"
+			else
+				name = "randungeon:unmossy_cobble"
+			end
 		end
 	end
-	-- don't replace nodes that were marked as irreplacable by air (like snow, water lillys, etc) (important bc of staircase walls)
-	if minetest.get_meta(pos):get_string("dont_replace_with_air") == "true"  then
+	local dont_replace, must_fireproof, fireproof_alt, meta = get_meta_flags(pos)
+	if dont_replace then
 		return
 	end
-	-- don't replace pool and pool bassin blocks in some cases (important for staircase extensions since these don't need to go into pools)
-	if dont_replace_pool_blocks and minetest.get_meta(pos):get_string("must_be_fireproof") == "true" then
+	if dont_replace_pool_blocks and must_fireproof then
 		return
 	end
-	-- sometimes nodes should be treated like air if the block they want to replace isn't solid
-	if only_replace_solid_blocks and minetest.registered_nodes[old_node_name].buildable_to then
-		name = "air"
+	if only_replace_solid_blocks then
+		local old_def = node_def_cache[old_node_name]
+		if old_def and old_def.buildable_to then
+			name = "air"
+		end
 	end
-	-- handle the rim of pool bassins specially
-	if minetest.get_meta(pos):get_string("must_be_fireproof") == "true" then
+	if must_fireproof then
 		if name == "air" or name == "randungeon:dungeon_air" then
 			name = "default:stone"
 		end
-		local alternative = minetest.get_meta(pos):get_string("fireproof_alternative")
-		if not minetest.registered_nodes[name].groups.flammable then
+		local new_def = node_def_cache[name]
+		local is_flammable = new_def and new_def.groups and new_def.groups.flammable
+		if not is_flammable then
 			minetest.set_node(pos, {name=name})
 		else
-			minetest.set_node(pos, {name=alternative})
+			minetest.set_node(pos, {name=fireproof_alt})
 		end
-		minetest.get_meta(pos):set_string("fireproof_alternative", alternative)
-		minetest.get_meta(pos):set_string("must_be_fireproof", "true")
+		meta:set_string("fireproof_alternative", fireproof_alt)
+		meta:set_string("must_be_fireproof", "true")
 		return
 	end
-	-- air nodes don't get placed, unless in water, in which case they get turned into glass, or lava, in which case they get turned into dungeon air
-	-- (that later gets automatically obsidian-glass-mantlet)
 	if name == "air" or name == "randungeon:dungeon_air" then
 		if old_node_name == "default:water_source" then
 			minetest.set_node(pos, {name="default:glass"})
-		elseif minetest.registered_nodes[old_node_name].groups.igniter then
+			return
+		end
+		local old_def = node_def_cache[old_node_name]
+		if old_def and old_def.groups and old_def.groups.igniter then
 			minetest.set_node(pos, {name="randungeon:dungeon_air"})
 		end
 		return
 	end
-	-- "[new_node]_with_" nodes don't get replaced, so stone with ores doesn't get replaced by stone
-	if string.find(old_node_name, "^"..name.."_with_") then
+	if #old_node_name > #name + 6 and old_node_name:sub(1, #name) == name and old_node_name:sub(#name + 1, #name + 6) == "_with_" then
 		return
 	end
-	-- otherwise, set node
 	minetest.set_node(pos, {name=name})
 end
 
 local function insulate_position(pos, only_against_fire)
-	if minetest.get_meta(pos):get_string("must_be_fireproof") == "true" then
-		return -- <-- if there's a fireproof alternative then all is well since this is just the controlled case of cutting into a pool
+	local _, must_fireproof = get_meta_flags(pos)
+	if must_fireproof then
+		return
 	end
-	local igniters = minetest.find_nodes_in_area({x=pos.x+1, y=pos.y+1, z=pos.z+1}, {x=pos.x-1, y=pos.y-1, z=pos.z-1}, {"group:igniter"})
-	for _, igniter_pos in pairs(igniters) do
-		minetest.set_node(igniter_pos, {name="default:obsidian_glass"})
+	local px, py, pz = pos.x, pos.y, pos.z
+	local a1 = {x=px+1, y=py+1, z=pz+1}
+	local a2 = {x=px-1, y=py-1, z=pz-1}
+	local igniters = minetest.find_nodes_in_area(a1, a2, igniter_groups)
+	for i = 1, #igniters do
+		minetest.set_node(igniters[i], {name="default:obsidian_glass"})
 	end
 	if only_against_fire then
-		return-- <-- option to only insulate against lava, but not against water
+		return
 	end
-	local igniters = minetest.find_nodes_in_area({x=pos.x+1, y=pos.y+1, z=pos.z+1}, {x=pos.x-1, y=pos.y-1, z=pos.z-1}, {"group:water"})
-	for _, igniter_pos in pairs(igniters) do
-		if minetest.get_meta(igniter_pos):get_string("must_be_fireproof") ~= "true" then
-			minetest.set_node(igniter_pos, {name="default:glass"})
+	local waters = minetest.find_nodes_in_area(a1, a2, water_groups)
+	for i = 1, #waters do
+		local wpos = waters[i]
+		if minetest.get_meta(wpos):get_string("must_be_fireproof") ~= "true" then
+			minetest.set_node(wpos, {name="default:glass"})
 		end
 	end
 end
@@ -139,10 +166,10 @@ local function make_insulated_cavity(pos)
 end
 
 local function fill_with_dungeon_air_if_okay(pos)
-	local meta = minetest.get_meta(pos)
-	if not (meta:get_string("dont_replace_with_air") == "true") then
-		minetest.set_node(pos, {name="randungeon:dungeon_air"})
+	if minetest.get_meta(pos):get_string("dont_replace_with_air") == "true" then
+		return
 	end
+	minetest.set_node(pos, {name="randungeon:dungeon_air"})
 end
 
 --
@@ -351,25 +378,48 @@ end
 
 local function build_dungeon_tile_pillar(pos, pillar_type, dungeon_deph)
 	if pillar_type == "air" or pillar_type == "randungeon:dungeon_air" then
-		return -- shouldn't happen usually anyways but whatever
+		return
 	end
-	-- dungeon_deph is the distance between dungeon levels
+	local p1 = {x=pos.x+3, y=pos.y-dungeon_deph+2, z=pos.z+3}
+	local p2 = {x=pos.x+8, y=pos.y, z=pos.z+8}
+	local igniters_in_area = minetest.find_nodes_in_area(p1, p2, igniter_groups)
+	local igniter_set = {}
+	for i = 1, #igniters_in_area do
+		local ip = igniters_in_area[i]
+		igniter_set[(ip.x * 1000000 + ip.y) * 1000000 + ip.z] = true
+	end
+	local function is_near_igniter(x, y, z)
+		for dx = -1, 1 do
+			for dy = -1, 1 do
+				for dz = -1, 1 do
+					local key = ((x+dx) * 1000000 + (y+dy)) * 1000000 + (z+dz)
+					if igniter_set[key] then
+						return true
+					end
+				end
+			end
+		end
+		return false
+	end
+	local y_start = pos.y - dungeon_deph + 3
+	local y_end = pos.y - 1
+	local inner_start_y = y_start + 1
 	for x = pos.x+4, pos.x+7 do
 		for z = pos.z+4, pos.z+7 do
-			for y = pos.y-dungeon_deph + 3, pos.y-1 do
-				if not (y > pos.y-dungeon_deph+3 and (x>pos.x+6 or x<pos.x+5 or z>pos.z+6 or z<pos.z+5)) then
+			local is_outer_x = (x <= pos.x+5 or x >= pos.x+6)
+			local is_outer_z = (z <= pos.z+5 or z >= pos.z+6)
+			for y = y_start, y_end do
+				if not (y > inner_start_y and (is_outer_x or is_outer_z)) then
 					local new_pos = {x=x, y=y, z=z}
 					local node = minetest.get_node(new_pos)
-					if minetest.registered_nodes[node.name].buildable_to then
-						-- change into obsidian (if igniter is near)
-						if minetest.find_node_near(new_pos, 1, {"group:igniter"}) then
+					local node_def = node_def_cache[node.name]
+					if node_def and node_def.buildable_to then
+						if is_near_igniter(x, y, z) then
 							node.name = "default:obsidian"
-							minetest.set_node(new_pos, node)
-						-- otherwise, set intended block
 						else
 							node.name = pillar_type
-							minetest.set_node(new_pos, node)
 						end
+						minetest.set_node(new_pos, node)
 					end
 				end
 			end
@@ -675,7 +725,7 @@ local function add_artificial_caves(pos, width, height_in_blocks, wanted_cave_pe
 	--print("needed_new_nature_in_caves: " .. needed_new_nature_in_caves)
 
 	while true do
-		if fruitless_attempts > (1 / chance_of_block_being_air * 10) or needed_new_nature_in_caves <= 0 then
+		if fruitless_attempts > math.min(200, (1 / chance_of_block_being_air) * 2) or needed_new_nature_in_caves <= 0 then
 			break
 		end
 		local bubble_radius = math.random(radius_min, radius_max)
@@ -687,11 +737,8 @@ local function add_artificial_caves(pos, width, height_in_blocks, wanted_cave_pe
 		if minetest.get_node(bubble_pos).name == "air" and bubble_pos.y < -30 and minetest.get_node_light(bubble_pos, 0.5) == 0 then
 			needed_new_nature_in_caves = needed_new_nature_in_caves - 4/3 * math.pi * bubble_radius ^ 3
 			fruitless_attempts = 0
-			-- decide what nature we'll add to the bubble
 			local nature = get_random_cave_nature_type()
-			local nature_metadata = make_metadata_for_nature({x=bubble_pos.x, y=bubble_pos.y - bubble_radius * 1/3, z=bubble_pos.z}, nature, cave_data_so_far)
-			-- define how cave data looks
-			local cave_data_so_far = {
+			local cave_data_pre = {
 				center_pos = bubble_pos,
 				cave_floor = bubble_pos.y - bubble_radius * 2,
 				radius = bubble_radius,
@@ -699,8 +746,10 @@ local function add_artificial_caves(pos, width, height_in_blocks, wanted_cave_pe
 				frozen = false,
 				fill_height = false,
 				nature = nature,
-				nature_metadata=nature_metadata.fields
 			}
+			local nature_metadata = make_metadata_for_nature({x=bubble_pos.x, y=bubble_pos.y - bubble_radius * 1/3, z=bubble_pos.z}, nature, cave_data_pre)
+			cave_data_pre.nature_metadata = nature_metadata.fields
+			local cave_data_so_far = cave_data_pre
 			-- fill randungeon.dungeons data structure with info on our cave
 			local highest_y_value = bubble_pos.y + bubble_radius
 			if not bubble_cave_data[highest_y_value] then
@@ -753,16 +802,14 @@ local function add_artificial_caves(pos, width, height_in_blocks, wanted_cave_pe
 	fruitless_attempts = 0
 
 	while true do
-		-- make it easier if we are stuck and exit if we are still stuck after that
-		if round == 1 and (needed_new_air_blocks <= 0 or fruitless_attempts > 30000) then
+		if round == 1 and (needed_new_air_blocks <= 0 or fruitless_attempts > 3000) then
 			round = 2
 			radius_min = 10
 			radius_max = 20
 			fruitless_attempts = 0
-		elseif round == 2 and (needed_new_air_blocks <= 0 or fruitless_attempts > 10000) then
+		elseif round == 2 and (needed_new_air_blocks <= 0 or fruitless_attempts > 1500) then
 			break
 		end
-		-- decide on radius and position
 		local max_bubble_radius = math.min(radius_max, math.ceil(needed_new_air_blocks * 3/2 / math.pi))
 		local bubble_radius = math.random(radius_min, max_bubble_radius)
 		local bubble_pos = {
@@ -770,8 +817,25 @@ local function add_artificial_caves(pos, width, height_in_blocks, wanted_cave_pe
 			y = math.random(pos.y, pos.y-height_in_blocks),
 			z = math.random(pos.z, pos.z+10*width)
 		}
-		-- greenlight it if it doesn't intersect with pre-existing caves
-		if not minetest.find_node_near(bubble_pos, bubble_radius+1, {"air", "group:liquid"}) then
+		local sample_r = math.min(bubble_radius, math.floor(bubble_radius * 0.6))
+		local sample_points = {
+			bubble_pos,
+			{x=bubble_pos.x+sample_r, y=bubble_pos.y, z=bubble_pos.z},
+			{x=bubble_pos.x-sample_r, y=bubble_pos.y, z=bubble_pos.z},
+			{x=bubble_pos.x, y=bubble_pos.y+sample_r, z=bubble_pos.z},
+			{x=bubble_pos.x, y=bubble_pos.y-sample_r, z=bubble_pos.z},
+			{x=bubble_pos.x, y=bubble_pos.y, z=bubble_pos.z+sample_r},
+			{x=bubble_pos.x, y=bubble_pos.y, z=bubble_pos.z-sample_r},
+		}
+		local intersects_quick = false
+		for i = 1, #sample_points do
+			local nn = minetest.get_node(sample_points[i]).name
+			if nn == "air" or (node_def_cache[nn] and node_def_cache[nn].groups and node_def_cache[nn].groups.liquid) then
+				intersects_quick = true
+				break
+			end
+		end
+		if not intersects_quick and not minetest.find_node_near(bubble_pos, bubble_radius+1, {"air", "group:liquid"}) then
 			-- choose what to fill bubbles with
 			local material
 			local cave_floor_flattened
@@ -966,14 +1030,11 @@ local function make_dungeon_level(pos, width, floor_type, wall_type_1, wall_type
 	end
 	-- replace dungeon air with normal air
 	if not called_by_dungeon_maker_function then
-		for x = 1, width * 10 do
-			for z = 1, width * 10 do
-				for y = 0, dungeon_deph do
-					if minetest.get_node({x=pos.x+x, y=pos.y+y, z=pos.z+z}).name == "randungeon:dungeon_air" then
-						minetest.set_node({x=pos.x+x, y=pos.y+y, z=pos.z+z}, {name="air"})
-					end
-				end
-			end
+		local area_p1 = {x=pos.x+1, y=pos.y, z=pos.z+1}
+		local area_p2 = {x=pos.x + width*10, y=pos.y + dungeon_deph, z=pos.z + width*10}
+		local dungeon_air_nodes = minetest.find_nodes_in_area(area_p1, area_p2, {"randungeon:dungeon_air"})
+		for i = 1, #dungeon_air_nodes do
+			minetest.set_node(dungeon_air_nodes[i], {name="air"})
 		end
 	end
 end
@@ -1116,19 +1177,20 @@ local function make_dungeon(pos, width, floor_type, wall_type_1, wall_type_2, ro
 		make_dungeon_level(level_pos, width, floor_type, wall_type_1, wall_type_2, roof_type, pillar_type, dungeon_deph, staircase_height, pillar_height,
 		                   rim_sealed, true, bridge_type, room_style, dungeon_maps[i], i==1, this_dungeon)
 	end
-	-- replace dungeon air with normal air
-	for x = 1, width * 10 do
-		for z = 1, width * 10 do
-			-- for y = -dungeon_levels*dungeon_deph-1, dungeon_deph do
-			for y = -(dungeon_top_deph + dungeon_bottom_deph + (dungeon_levels - 1) * dungeon_deph)-17, dungeon_top_deph+10 do
-				local p = {x=pos.x+x, y=pos.y+y, z=pos.z+z}
-				local current_node = minetest.get_node(p).name
-				if contains({"randungeon:dungeon_air", "air"}, current_node) and light_up_corridors then
-					minetest.set_node(p, {name="randungeon:air_glowing"})
-				elseif current_node == "randungeon:dungeon_air" then
-					minetest.set_node(p, {name="air"})
-				end
-			end
+	-- replace dungeon air with normal air (and optionally light up corridors)
+	local y_start = -(dungeon_top_deph + dungeon_bottom_deph + (dungeon_levels - 1) * dungeon_deph) - 17
+	local y_end = dungeon_top_deph + 10
+	local area_p1 = {x=pos.x+1, y=pos.y + y_start, z=pos.z+1}
+	local area_p2 = {x=pos.x + width*10, y=pos.y + y_end, z=pos.z + width*10}
+	if light_up_corridors then
+		local air_nodes = minetest.find_nodes_in_area(area_p1, area_p2, {"air", "randungeon:dungeon_air"})
+		for i = 1, #air_nodes do
+			minetest.set_node(air_nodes[i], {name="randungeon:air_glowing"})
+		end
+	else
+		local dungeon_air_nodes = minetest.find_nodes_in_area(area_p1, area_p2, {"randungeon:dungeon_air"})
+		for i = 1, #dungeon_air_nodes do
+			minetest.set_node(dungeon_air_nodes[i], {name="air"})
 		end
 	end
 

@@ -51,13 +51,13 @@ if generation_enabled then
         minpos = table.copy(minpos)
         minpos.x = math.ceil(minpos.x / n) * n
         minpos.z = math.ceil(minpos.z / n) * n
+        local scheduled_dungeons = {}
         for x = minpos.x, maxpos.x, n do
             for z = minpos.z, maxpos.z, n do
-                local pos = {x=x, y=0, z=z}
                 if math.random() < dungeon_chance then
                     local pos = {x=x, y=200, z=z}
-                    local levels
                     local rand = math.random()
+                    local levels
                     if rand < 0.1 then
                         levels = 50 -- 10% chance
                     elseif rand < 0.3 then
@@ -67,12 +67,20 @@ if generation_enabled then
                     else
                         levels = 10 -- 40% chance
                     end
+                    scheduled_dungeons[#scheduled_dungeons + 1] = {pos=pos, levels=levels}
+                end
+            end
+        end
+        if #scheduled_dungeons > 0 then
+            minetest.after(0, function()
+                for i = 1, #scheduled_dungeons do
+                    local s = scheduled_dungeons[i]
                     make_dungeon(
-                        pos, 10, -- pos and width
+                        s.pos, 10, -- pos and width
                         nil, nil, nil, nil, nil, nil, -- materials
                         12, -- dungeon_deph
                         true, --- rim_sealed
-                        levels, -- dungeon levels
+                        s.levels, -- dungeon levels
                         100, 250, -- bottom deph and top deph
                         true, -- random materials
                         30, -- cave_percentage
@@ -82,7 +90,7 @@ if generation_enabled then
                         nil -- dungeon id
                     )
                 end
-            end
+            end)
         end
     end)
 end
