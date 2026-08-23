@@ -84,6 +84,7 @@ local function save_pending_houses()
 			p2x = h.p2.x, p2y = h.p2.y, p2z = h.p2.z,
 			seed = h.pr_seed,
 			chest = h.has_chest and 1 or 0,
+			fh = h.floor_height_list,
 		})
 	end
 	basic_houses.storage:set_string("pending_monster_houses", minetest.serialize(list))
@@ -101,11 +102,21 @@ local function load_pending_houses()
 		local p2 = {x = tonumber(h.p2x) or 0, y = tonumber(h.p2y) or 0, z = tonumber(h.p2z) or 0}
 		local k = house_key(p1)
 		if not basic_houses.pending_monster_houses[k] then
+			local fh = nil
+			if type(h.fh) == "table" and #h.fh > 0 then
+				fh = {}
+				for i, v in ipairs(h.fh) do
+					local n = tonumber(v)
+					if n then table.insert(fh, n) end
+				end
+				if #fh == 0 then fh = nil end
+			end
 			basic_houses.pending_monster_houses[k] = {
 				p1 = p1,
 				p2 = p2,
 				pr_seed = tonumber(h.seed) or 1,
 				has_chest = (tonumber(h.chest) or 0) == 1,
+				floor_height_list = fh,
 				attempts = 0,
 				next_try_at = 0,
 				added_at = os and os.time and os.time() or 0,
@@ -946,8 +957,17 @@ basic_houses.simple_hut_place_hut_using_vm = function( data, materials, vm, pr )
 	basic_houses.place_door( p_start, sizex, sizez, reserved_places, wall_with_ladder, floor_height, vm, pr );
 	local chest_info = basic_houses.place_chest( p_start, sizex, sizez, reserved_places, wall_with_ladder, floor_height, vm, materials, pr );
 
-	-- return where the hut has been placed, plus the chest info for deferred meta filling
-	return {p1={x=p.x - sizex, y=p.y, z=p.z - sizez }, p2=p, chest_info=chest_info};
+	-- return where the hut has been placed, plus the chest info for deferred meta filling.
+	-- NOTE: p2.y is intentionally raised to the HIGHEST walkable interior level (top
+	-- ceiling/floor) so that later interior scans cover every floor, not just the first.
+	local highest_floor_y = floor_height[#floor_height] or p.y
+	return {
+		p1={x=p.x - sizex, y=p.y, z=p.z - sizez},
+		p2={x=p.x, y=highest_floor_y, z=p.z},
+		chest_info=chest_info,
+		floors_total = materials.floors,
+		floor_height_list = floor_height,
+	};
 end
 
 
@@ -1136,44 +1156,69 @@ local function try_find_ground_at(mx, mz, base_y)
 	return found_y, false
 end
 
--- Find one valid standing position (walkable below, air/open at +0 and +1) inside the
--- house box, bounded by the xz slice of a given floor. Scans deterministically with
--- pr-based jitter so monster placement is varied but still reproducible per attempt.
--- Returns {x,y,z} or nil. Second return is "blocked by unloaded" boolean.
-local function try_collect_indoor_candidates(p1, p2, pr)
-	local candidates = {}
+-- Returns (candidates_by_floor_list_of_tables, any_blocked)
+-- The outer list has one entry per floor (in order from ground -> top).
+-- Each inner list is the set of valid standing {x,y,z} positions on that floor.
+-- This structure lets the caller ensure *every* floor gets at least one monster.
+local function collect_indoor_candidates_by_floor(p1, p2, floor_y_list, pr)
+	local by_floor = {}
 	local any_blocked = false
 
 	local xmin = math.min(p1.x, p2.x) + 1
 	local xmax = math.max(p1.x, p2.x) - 1
 	local zmin = math.min(p1.z, p2.z) + 1
 	local zmax = math.max(p1.z, p2.z) - 1
-	local ymin = math.min(p1.y, p2.y)
-	local ymax = math.max(p1.y, p2.y)
-
-	if xmax < xmin or zmax < zmin or ymax <= ymin then
-		return candidates, false
+	if xmax < xmin or zmax < zmin then
+		return by_floor, false
 	end
-
 	local xs = xmax - xmin + 1
 	local zs = zmax - zmin + 1
-	local ys = ymax - ymin + 1
 
-	local sample_count_x = math.min(8, xs)
-	local sample_count_z = math.min(8, zs)
+	local floors_to_scan = {}
+	if floor_y_list and type(floor_y_list) == "table" and #floor_y_list > 0 then
+		for i = 1, #floor_y_list do
+			local floor_y = tonumber(floor_y_list[i])
+			-- last floor entry is usually the top ceiling (not a walkable interior floor);
+			-- skip it when it's equal to previous or way above the last interior level.
+			-- We still scan if it's <= p2.y, because we'll only accept valid positions anyway.
+			if floor_y then
+				table.insert(floors_to_scan, {
+					floor_index = i,
+					floor_y = floor_y,
+					stand_y = floor_y + 1,
+				})
+			end
+		end
+	else
+		local span = math.max(0, (math.max(p1.y, p2.y) or 0) - (math.min(p1.y, p2.y) or 0))
+		local est_floors = math.max(1, math.floor(span / 4) + 1)
+		local y0 = math.min(p1.y, p2.y)
+		for i = 1, est_floors do
+			table.insert(floors_to_scan, {
+				floor_index = i,
+				floor_y = y0 + (i - 1) * 4,
+				stand_y = y0 + (i - 1) * 4 + 1,
+			})
+		end
+	end
+
+	local sample_count_x = math.min(10, xs)
+	local sample_count_z = math.min(10, zs)
 	local step_x = math.max(1, math.floor(xs / sample_count_x))
 	local step_z = math.max(1, math.floor(zs / sample_count_z))
 
-	for y = ymin, ymax do
+	for _, floor in ipairs(floors_to_scan) do
+		local floor_candidates = {}
+		local stand_y = floor.stand_y
 		for x = xmin, xmax, step_x do
 			for z = zmin, zmax, step_z do
 				local jx = x + pr:next(0, math.max(0, step_x - 1))
 				local jz = z + pr:next(0, math.max(0, step_z - 1))
 				jx = math.min(xmax, jx)
 				jz = math.min(zmax, jz)
-				local pos_under = {x = jx, y = y - 1, z = jz}
-				local pos_at = {x = jx, y = y, z = jz}
-				local pos_above = {x = jx, y = y + 1, z = jz}
+				local pos_under = {x = jx, y = stand_y - 1, z = jz}
+				local pos_at = {x = jx, y = stand_y, z = jz}
+				local pos_above = {x = jx, y = stand_y + 1, z = jz}
 				local nu = minetest.get_node_or_nil(pos_under)
 				local na = minetest.get_node_or_nil(pos_at)
 				local nab = minetest.get_node_or_nil(pos_above)
@@ -1189,13 +1234,14 @@ local function try_collect_indoor_candidates(p1, p2, pr)
 					local na_passable = (na.name == "air") or (na_def and na_def.walkable == false) or false
 					local nab_passable = (nab.name == "air") or (nab_def and nab_def.walkable == false) or false
 					if nu_walkable and na_passable and nab_passable then
-						table.insert(candidates, {x = jx, y = y, z = jz})
+						table.insert(floor_candidates, {x = jx, y = stand_y, z = jz})
 					end
 				end
 			end
 		end
+		table.insert(by_floor, floor_candidates)
 	end
-	return candidates, any_blocked
+	return by_floor, any_blocked
 end
 
 local powerful_monster_names = {}
@@ -1291,39 +1337,124 @@ local function attempt_spawn_for_house(h, attempt)
 
 	local min_count, max_count
 	if h.has_chest then
-		min_count = 5
-		max_count = 9
+		min_count = 6
+		max_count = 10
 	else
-		min_count = 3
-		max_count = 6
+		min_count = 4
+		max_count = 7
 	end
 	local monster_count = pr:next(min_count, max_count)
 
-	local indoor_candidates, blocked_indoor = try_collect_indoor_candidates(p1, p2, pr)
+	local by_floor, blocked_indoor = collect_indoor_candidates_by_floor(p1, p2, h.floor_height_list, pr)
+
+	local indoor_floors_with_candidates = 0
+	for i, fc in ipairs(by_floor) do
+		if fc and #fc > 0 then
+			indoor_floors_with_candidates = indoor_floors_with_candidates + 1
+		end
+	end
+	-- Last floor in floor_height_list is the top ceiling (not a real interior floor),
+	-- drop it from the mandatory-per-floor count unless it has candidates.
+	local est_interior_floors = math.max(1, math.max(indoor_floors_with_candidates,
+		math.max(1, #by_floor - 1)))
 
 	local outdoor_target_frac
 	if h.has_chest then
-		outdoor_target_frac = 0.35
+		outdoor_target_frac = 0.25
 	else
-		outdoor_target_frac = 0.55
+		outdoor_target_frac = 0.45
 	end
+
 	local outdoor_count = math.max(1, math.floor(monster_count * outdoor_target_frac + 0.5))
-	local indoor_count = monster_count - outdoor_count
-	if indoor_count > 0 and #indoor_candidates == 0 and not blocked_indoor then
-		outdoor_count = monster_count
-		indoor_count = 0
+	local indoor_total = monster_count - outdoor_count
+	if indoor_total < est_interior_floors then
+		indoor_total = est_interior_floors
+		outdoor_count = math.max(1, monster_count - indoor_total)
 	end
+
+	local per_floor_min = 1
+	local indoor_floor_count = est_interior_floors
+	local remaining_indoor = indoor_total - indoor_floor_count * per_floor_min
+	if remaining_indoor < 0 then remaining_indoor = 0 end
 
 	local spawned_any = false
 	local any_blocked = false
-
 	if blocked_indoor then
 		any_blocked = true
 	end
 
+	-- Phase A: per-floor minimum (1 per real interior floor) -- ensures every floor has >= 1.
+	local floors_handled = 0
+	for floor_idx = 1, #by_floor do
+		local fc = by_floor[floor_idx]
+		local skip = false
+		-- Skip the last floor entry if it's the ceiling plate (equal to previous
+		-- floor + 0 or 1) AND there are no candidates on it.
+		if floor_idx == #by_floor and #by_floor > 1 then
+			local prev = by_floor[floor_idx - 1]
+			local prev_fy = nil
+			if prev and #prev > 0 and prev[1] then
+				prev_fy = prev[1].y - 1
+			end
+			local cur_fy = nil
+			if fc and #fc > 0 and fc[1] then
+				cur_fy = fc[1].y - 1
+			end
+			local floor_list = h.floor_height_list
+			if floor_list and type(floor_list) == "table" and #floor_list >= 2 then
+				local f1 = tonumber(floor_list[#floor_list - 1]) or 0
+				local f2 = tonumber(floor_list[#floor_list]) or 0
+				if f2 <= f1 + 2 and (#fc == 0) then
+					skip = true
+				end
+			elseif cur_fy and prev_fy and cur_fy - prev_fy <= 2 and #fc == 0 then
+				skip = true
+			end
+		end
+		if skip then
+		elseif floors_handled < indoor_floor_count then
+			floors_handled = floors_handled + 1
+			if fc and #fc > 0 then
+				local idx = pr:next(1, #fc)
+				local cand = fc[idx]
+				table.remove(fc, idx)
+				local mob_def = basic_houses.powerful_monsters[pr:next(1, #basic_houses.powerful_monsters)]
+				local ok = do_apply_single_monster(mob_def, cand, pr)
+				if ok then
+					spawned_any = true
+				end
+			end
+		end
+	end
+
+	-- Phase B: distribute remaining_indoor extras randomly across any floor that still has candidates.
+	local available = {}
+	for i, fc in ipairs(by_floor) do
+		if fc and #fc > 0 then
+			for j, c in ipairs(fc) do
+				table.insert(available, {c, i})
+			end
+		end
+	end
+	for i = 1, remaining_indoor do
+		if #available == 0 then
+			break
+		end
+		local pick = pr:next(1, #available)
+		local pair = available[pick]
+		table.remove(available, pick)
+		local cand = pair[1]
+		local mob_def = basic_houses.powerful_monsters[pr:next(1, #basic_houses.powerful_monsters)]
+		local ok = do_apply_single_monster(mob_def, cand, pr)
+		if ok then
+			spawned_any = true
+		end
+	end
+
+	-- Phase C: outdoor placements (remainder)
 	for i = 1, outdoor_count do
 		local angle = pr:next(0, 360) / 180 * math.pi
-		local dist = pr:next(2, 9)
+		local dist = pr:next(2, 10)
 		local mx = math.floor(house_cx + math.cos(angle) * dist + 0.5)
 		local mz = math.floor(house_cz + math.sin(angle) * dist + 0.5)
 		local found_y, blocked = try_find_ground_at(mx, mz, house_cy)
@@ -1336,20 +1467,6 @@ local function attempt_spawn_for_house(h, attempt)
 			if ok then
 				spawned_any = true
 			end
-		end
-	end
-
-	for i = 1, indoor_count do
-		if #indoor_candidates == 0 then
-			break
-		end
-		local idx = pr:next(1, #indoor_candidates)
-		local cand = indoor_candidates[idx]
-		table.remove(indoor_candidates, idx)
-		local mob_def = basic_houses.powerful_monsters[pr:next(1, #basic_houses.powerful_monsters)]
-		local ok = do_apply_single_monster(mob_def, cand, pr)
-		if ok then
-			spawned_any = true
 		end
 	end
 
@@ -1507,7 +1624,7 @@ end
 minetest.register_globalstep(scan_pending_monster_houses)
 
 
-basic_houses.spawn_powerful_monsters = function(p1, p2, pr, has_chest)
+basic_houses.spawn_powerful_monsters = function(p1, p2, pr, has_chest, floor_height_list)
 	if not p1 or not p2 then
 		return
 	end
@@ -1516,8 +1633,24 @@ basic_houses.spawn_powerful_monsters = function(p1, p2, pr, has_chest)
 	end
 	local k = house_key(p1)
 	if basic_houses.pending_monster_houses[k] then
-		if has_chest == true then
-			basic_houses.pending_monster_houses[k].has_chest = true
+		local entry = basic_houses.pending_monster_houses[k]
+		local dirty = false
+		if has_chest == true and not entry.has_chest then
+			entry.has_chest = true
+			dirty = true
+		end
+		if floor_height_list and type(floor_height_list) == "table" and #floor_height_list > 0 and (not entry.floor_height_list or #entry.floor_height_list < 2) then
+			local fh = {}
+			for i, v in ipairs(floor_height_list) do
+				local n = tonumber(v)
+				if n then table.insert(fh, n) end
+			end
+			if #fh > 0 then
+				entry.floor_height_list = fh
+				dirty = true
+			end
+		end
+		if dirty then
 			mark_pending_dirty()
 		end
 		return
@@ -1533,6 +1666,16 @@ basic_houses.spawn_powerful_monsters = function(p1, p2, pr, has_chest)
 	end
 	pr_seed = pr_seed % 2147483647
 	if pr_seed < 0 then pr_seed = pr_seed + 2147483647 end
+
+	local fh_saved = nil
+	if floor_height_list and type(floor_height_list) == "table" and #floor_height_list > 0 then
+		fh_saved = {}
+		for i, v in ipairs(floor_height_list) do
+			local n = tonumber(v)
+			if n then table.insert(fh_saved, n) end
+		end
+		if #fh_saved == 0 then fh_saved = nil end
+	end
 
 	local n = 0
 	local oldest_k = nil
@@ -1555,6 +1698,7 @@ basic_houses.spawn_powerful_monsters = function(p1, p2, pr, has_chest)
 		p2 = p2,
 		pr_seed = pr_seed,
 		has_chest = (has_chest == true),
+		floor_height_list = fh_saved,
 		attempts = 0,
 		next_try_at = 0,
 		added_at = os and os.time and os.time() or 0,
@@ -1605,7 +1749,8 @@ basic_houses.simple_hut_place_hut = function( data, materials, pr )
 
 	if hut_pos and hut_pos.p1 and hut_pos.p2 then
 		local has_chest = (hut_pos.chest_info and hut_pos.chest_info.pos and (not hut_pos.chest_info.is_machine)) and true or false
-		basic_houses.spawn_powerful_monsters(hut_pos.p1, hut_pos.p2, pr, has_chest)
+		local fhl = hut_pos.floor_height_list
+		basic_houses.spawn_powerful_monsters(hut_pos.p1, hut_pos.p2, pr, has_chest, fhl)
 	end
 end
 
