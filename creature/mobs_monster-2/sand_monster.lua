@@ -40,7 +40,7 @@ mobs:register_mob("mobs_monster:sand_monster", {
 	--specific_attack = {"player", "mobs_npc:npc"},
 	--ignore_invisibility = true,
 	reach = 2,
-	damage = 1,
+	damage = 3,
 	hp_min = 4,
 	hp_max = 20,
 	armor = 100,

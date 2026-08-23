@@ -76,7 +76,7 @@ mobs:register_mob("mobs_monster:land_guard", {
 	},
 	water_damage = 6,
 	lava_damage = 6,
-	light_damage = 6,
+	light_damage = 0,
 	fear_height = 8,
 	animation = {
 		stand_start = 0, stand_end = 19,

@@ -56,7 +56,7 @@ mobs:register_mob("mobs_monster:tree_monster", {
 	attack_animals = true,
 	--specific_attack = {"player", "mobs_animal:chicken"},
 	reach = 2,
-	damage = 2,
+	damage = 3,
 	hp_min = 20,
 	hp_max = 40,
 	armor = 100,
@@ -81,7 +81,7 @@ mobs:register_mob("mobs_monster:tree_monster", {
 	},
 	water_damage = 0,
 	lava_damage = 0,
-	light_damage = 2,
+	light_damage = 0,
 	fall_damage = 0,
 	immune_to = {
 		{"default:sapling", -5},
