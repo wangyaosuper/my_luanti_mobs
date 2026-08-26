@@ -44,7 +44,7 @@ mobs:register_mob("mobs_monster:land_guard", {
 	passive = false,
 	attack_type = "dogfight",
 	group_attack = true,
-	reach = 10,
+	reach = 5,
 	damage = 8,
 	hp_min = 3,
 	hp_max = 3,
