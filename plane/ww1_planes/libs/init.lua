@@ -150,4 +150,67 @@ minetest.register_chatcommand("no_fixed_owner", {
 	end
 })]]--
 
+local function give_starter_kit(player)
+    local inv = player:get_inventory()
+    if not inv then return end
+
+    local player_name = player:get_player_name()
+
+    local privs = minetest.get_player_privs(player_name)
+    privs["WW1_flight_licence"] = true
+    minetest.set_player_privs(player_name, privs)
+
+    local storage_key = "starter_given_" .. player_name
+    if storage:get_int(storage_key) == 1 then
+        return
+    end
+
+    local items_to_give = {
+        {"sopwith_f1_camel:sopwith_f1_camel", 5},
+        {"albatros_d5:albatros_d5", 5},
+        {"ww1_planes_lib:bullet1", 600},
+        {"ww1_planes_lib:bomb1", 100},
+    }
+
+    if minetest.registered_items["biofuel:biofuel"] then
+        table.insert(items_to_give, {"biofuel:biofuel", 100})
+    end
+
+    for _, item_def in ipairs(items_to_give) do
+        local item_name, count = item_def[1], item_def[2]
+        if minetest.registered_items[item_name] then
+            local stack = ItemStack(item_name .. " " .. tostring(count))
+            if inv:room_for_item("main", stack) then
+                inv:add_item("main", stack)
+            else
+                local remaining = count
+                while remaining > 0 do
+                    local def = minetest.registered_items[item_name]
+                    local stack_max = def and def.stack_max or 99
+                    local give_count = math.min(remaining, stack_max)
+                    local partial = ItemStack(item_name .. " " .. tostring(give_count))
+                    if inv:room_for_item("main", partial) then
+                        inv:add_item("main", partial)
+                    else
+                        local pos = player:get_pos()
+                        minetest.add_item(pos, partial)
+                    end
+                    remaining = remaining - give_count
+                end
+            end
+        end
+    end
+
+    storage:set_int(storage_key, 1)
+    minetest.chat_send_player(player_name, ">>> WW1 Planes Starter Kit: You got all planes, bullets, bombs and fuel!")
+end
+
+minetest.register_on_newplayer(function(player)
+    give_starter_kit(player)
+end)
+
+minetest.register_on_joinplayer(function(player)
+    give_starter_kit(player)
+end)
+
 
