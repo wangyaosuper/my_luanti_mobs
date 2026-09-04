@@ -278,32 +278,6 @@ minetest.register_on_joinplayer(function(player)
         end
     end
 
-    local function create_filled_mag(mag_itemstring, round_itemstring, capacity)
-        local stack = ItemStack(mag_itemstring)
-        local meta = stack:get_meta()
-        local rounds = {}
-        rounds[round_itemstring] = capacity
-        meta:set_string("guns4d_loaded_rounds", minetest.serialize(rounds))
-        meta:set_int("guns4d_spawn_with_ammo", 0)
-        stack:set_wear(0)
-        if Guns4d.ammo and Guns4d.ammo.update_mag then
-            Guns4d.ammo.update_mag(nil, stack, meta)
-        end
-        return stack
-    end
-
-    local mags_to_give = {
-        create_filled_mag("guns4d_pack_1:awm_magazine", "guns4d_pack_1:338L", 7),
-        create_filled_mag("guns4d_pack_1:stanag", "guns4d_pack_1:556", 30),
-        create_filled_mag("guns4d_pack_1:45mm_magazine_13", "guns4d_pack_1:45A", 13),
-        ItemStack("guns4d_pack_1:12G 15")
-    }
-    for _, stack in ipairs(mags_to_give) do
-        if not inv:contains_item(listname, stack) then
-            inv:add_item(listname, stack)
-        end
-    end
-
     Guns4d.players[pname].infinite_ammo = true
     if Guns4d.players[pname].gun then
         Guns4d.players[pname].gun:update_image_and_text_meta()
