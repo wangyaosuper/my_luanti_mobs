@@ -184,6 +184,20 @@ function ray:iterate()
         self.energy = self.energy-((self.init_def.energy*self.energy_sharp_ratio)*(penetration_loss/self.sharp_penetration))
     end
 
+    --handle breaks behavior for fragile nodes like glass
+    if pointed_node then
+        local node_name = minetest.get_node(pointed_node.under).name
+        local node_props = Guns4d.node_properties[node_name]
+        if node_props and node_props.behavior == "breaks" then
+            local dropoff = self.energy/self.init_def.energy
+            local effective_pen = self.sharp_penetration * math.max(dropoff, 0.01)
+            local required_pen = node_props.mmRHA * (1 + node_props.random_deviation * (math.random()*2-1))
+            if effective_pen >= required_pen then
+                minetest.remove_node(pointed_node.under)
+                minetest.check_for_falling(pointed_node.under)
+            end
+        end
+    end
     --apply damage to objects
     if pointed_object then
         self.pos = pointed_object.intersection_point
@@ -364,6 +378,18 @@ function ray:simple_cast(pos, dir)
         if (hit.type == "node") and (Guns4d.node_properties[minetest.get_node(hit.under).name].behavior ~= "ignore") then
             self:bullet_hole(hit.intersection_point, hit.intersection_normal)
             pointed = hit
+            local node_name = minetest.get_node(hit.under).name
+            local node_props = Guns4d.node_properties[node_name]
+            if node_props and node_props.behavior == "breaks" then
+                local dist = vector.distance(hit.intersection_point, pos)
+                local dropoff = (self.energy - (dist*self.energy_dropoff)) / self.init_def.energy
+                local effective_pen = self.sharp_penetration * math.max(dropoff, 0.01)
+                local required_pen = node_props.mmRHA * (1 + node_props.random_deviation * (math.random()*2-1))
+                if effective_pen >= required_pen then
+                    minetest.remove_node(hit.under)
+                    minetest.check_for_falling(hit.under)
+                end
+            end
             break
         elseif (hit.type == "object") and (hit.ref ~= self.player) then
             self.energy = self.energy-(vector.distance(hit.intersection_point, pos)*self.energy_dropoff)

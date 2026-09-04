@@ -61,6 +61,11 @@ minetest.register_on_mods_loaded(function()
             --random_deviation = .1
             behavior_type = "ignore"
         end
+        if groups.glass then
+            RHA = RHA / (groups.glass * 200)
+            random_deviation = 0.2
+            behavior_type = "breaks"
+        end
         --"rolled homogenous armor"
         if behavior_type=="ignore" then
             RHA=0
